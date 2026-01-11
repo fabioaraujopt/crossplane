@@ -90,6 +90,16 @@ func NewManager(cacheDir string, fs afero.Fs, w io.Writer, opts ...Option) *Mana
 	return m
 }
 
+// GetFetcher returns the image fetcher.
+func (m *Manager) GetFetcher() ImageFetcher {
+	return m.fetcher
+}
+
+// GetCache returns the cache.
+func (m *Manager) GetCache() Cache {
+	return m.cache
+}
+
 // PrepExtensions converts the unstructured XRDs/CRDs to CRDs and extract package images to add as a dependency.
 func (m *Manager) PrepExtensions(extensions []*unstructured.Unstructured) error { //nolint:gocognit // the function itself is not that complex, it just has different cases
 	for _, e := range extensions {

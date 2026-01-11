@@ -1,0 +1,36 @@
+---
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: test-composition-valid
+  labels:
+    provider: test
+spec:
+  compositeTypeRef:
+    apiVersion: test.example.com/v1alpha1
+    kind: TestStamp
+  mode: Pipeline
+  pipeline:
+    - step: patch-and-transform
+      functionRef:
+        name: crossplane-function-patch-and-transform
+      input:
+        apiVersion: pt.fn.crossplane.io/v1beta1
+        kind: Resources
+        resources:
+          - name: resource-a
+            base:
+              apiVersion: other.example.com/v1
+              kind: OtherResource
+              spec:
+                forProvider: {}
+            patches:
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.region
+                toFieldPath: spec.forProvider.region
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.environment
+                toFieldPath: spec.forProvider.environment
+              - type: ToCompositeFieldPath
+                fromFieldPath: status.id
+                toFieldPath: status.resourceId

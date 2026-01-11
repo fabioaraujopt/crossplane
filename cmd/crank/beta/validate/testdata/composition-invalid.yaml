@@ -1,0 +1,39 @@
+---
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: test-composition-invalid
+  labels:
+    provider: test
+spec:
+  compositeTypeRef:
+    apiVersion: test.example.com/v1alpha1
+    kind: TestStamp
+  mode: Pipeline
+  pipeline:
+    - step: patch-and-transform
+      functionRef:
+        name: crossplane-function-patch-and-transform
+      input:
+        apiVersion: pt.fn.crossplane.io/v1beta1
+        kind: Resources
+        resources:
+          - name: resource-a
+            base:
+              apiVersion: other.example.com/v1
+              kind: OtherResource
+              spec:
+                forProvider: {}
+            patches:
+              # Valid patch
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.region
+                toFieldPath: spec.forProvider.region
+              # Invalid patch - typo in fromFieldPath
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.paramters.environment
+                toFieldPath: spec.forProvider.environment
+              # Invalid patch - non-existent field
+              - type: FromCompositeFieldPath
+                fromFieldPath: spec.parameters.nonExistentField
+                toFieldPath: spec.forProvider.other

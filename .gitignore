@@ -38,3 +38,7 @@ gitlab/
 /.claude
 CLAUDE.md
 AGENTS.md
+
+# Built binaries
+crossplane-full-validator
+crank

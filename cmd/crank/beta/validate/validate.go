@@ -34,6 +34,7 @@ import (
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/errors"
 
+	"github.com/crossplane/crossplane/v2/cmd/crank/common/load"
 	"github.com/crossplane/crossplane/v2/internal/xcrd"
 )
 
@@ -96,13 +97,19 @@ func newValidatorsAndStructurals(crds []*extv1.CustomResourceDefinition) (map[ru
 }
 
 // SchemaValidation validates the resources against the given CRDs.
-func SchemaValidation(ctx context.Context, resources []*unstructured.Unstructured, crds []*extv1.CustomResourceDefinition, errorOnMissingSchemas bool, skipSuccessLogs bool, w io.Writer) error { //nolint:gocognit // printing the output increases the cyclomatic complexity a little bit
+func SchemaValidation(ctx context.Context, resources []*unstructured.Unstructured, crds []*extv1.CustomResourceDefinition, errorOnMissingSchemas bool, skipSuccessLogs bool, w io.Writer) error {
+	return SchemaValidationWithPatches(ctx, resources, crds, errorOnMissingSchemas, skipSuccessLogs, nil, w)
+}
+
+// SchemaValidationWithPatches validates resources with awareness of patches that fill required fields.
+func SchemaValidationWithPatches(ctx context.Context, resources []*unstructured.Unstructured, crds []*extv1.CustomResourceDefinition, errorOnMissingSchemas bool, skipSuccessLogs bool, patchCollector *PatchedFieldsCollector, w io.Writer) error { //nolint:gocognit // printing the output increases the cyclomatic complexity a little bit
 	schemaValidators, structurals, err := newValidatorsAndStructurals(crds)
 	if err != nil {
 		return errors.Wrap(err, "cannot create schema validators")
 	}
 
 	failure, missingSchemas := 0, 0
+	missingGVKs := make(map[string]int) // Track which GVKs are missing and how many times
 
 	for _, r := range resources {
 		gvk := r.GetObjectKind().GroupVersionKind()
@@ -111,11 +118,8 @@ func SchemaValidation(ctx context.Context, resources []*unstructured.Unstructure
 
 		if !ok {
 			missingSchemas++
-
-			if _, err := fmt.Fprintf(w, "[!] could not find CRD/XRD for: %s\n", r.GroupVersionKind().String()); err != nil {
-				return errors.Wrap(err, errWriteOutput)
-			}
-
+			gvkStr := r.GroupVersionKind().String()
+			missingGVKs[gvkStr]++
 			continue
 		}
 
@@ -125,29 +129,81 @@ func SchemaValidation(ctx context.Context, resources []*unstructured.Unstructure
 			}
 		}
 
+		// Get source location for better error messages
+		sourceFile := load.GetSourceFile(r)
+		sourceLine := load.GetSourceLine(r)
+
+		// Get base resource name from annotation (if this is a base resource extracted from composition)
+		baseResourceName := ""
+		if annotations := r.GetAnnotations(); annotations != nil {
+			baseResourceName = annotations["crossplane.io/base-resource-name"]
+		}
+
 		rf := 0
-
-		re := field.ErrorList{}
 		for _, v := range sv {
-			re = append(re, validation.ValidateCustomResource(nil, r, *v)...)
+			schemaErrors := validation.ValidateCustomResource(nil, r, *v)
+			unknownFieldErrors := validateUnknownFields(r.UnstructuredContent(), s)
 
-			re = append(re, validateUnknownFields(r.UnstructuredContent(), s)...)
-			for _, e := range re {
+			// Combine errors
+			allErrors := append(schemaErrors, unknownFieldErrors...)
+
+			// Filter out required field errors if this is a base resource with patches
+			if patchCollector != nil && baseResourceName != "" {
+				allErrors = FilterRequiredFieldErrors(allErrors, baseResourceName, patchCollector)
+			}
+
+			for _, e := range allErrors {
 				rf++
 
-				if _, err := fmt.Fprintf(w, "[x] schema validation error %s, %s : %s\n", r.GroupVersionKind().String(), getResourceName(r), e.Error()); err != nil {
-					return errors.Wrap(err, errWriteOutput)
+				// Try to find the exact line using the error path
+				errorLine := sourceLine
+				if sourceFile != "" && e.Field != "" {
+					exactLine := load.FindPathInYAML(sourceFile, sourceLine, e.Field)
+					if exactLine > 0 {
+						errorLine = exactLine
+					}
+				}
+
+				if sourceFile != "" {
+					if _, err := fmt.Fprintf(w, "[x] %s:%d: schema validation error %s, %s : %s\n", sourceFile, errorLine, r.GroupVersionKind().String(), getResourceName(r), e.Error()); err != nil {
+						return errors.Wrap(err, errWriteOutput)
+					}
+				} else {
+					if _, err := fmt.Fprintf(w, "[x] schema validation error %s, %s : %s\n", r.GroupVersionKind().String(), getResourceName(r), e.Error()); err != nil {
+						return errors.Wrap(err, errWriteOutput)
+					}
 				}
 			}
 
 			celValidator := cel.NewValidator(s, true, celconfig.PerCallLimit)
 
-			re, _ = celValidator.Validate(ctx, nil, s, r.Object, nil, celconfig.PerCallLimit)
-			for _, e := range re {
+			celErrors, _ := celValidator.Validate(ctx, nil, s, r.Object, nil, celconfig.PerCallLimit)
+
+			// Filter CEL required field errors too
+			if patchCollector != nil && baseResourceName != "" {
+				celErrors = filterCELRequiredErrors(celErrors, baseResourceName, patchCollector)
+			}
+
+			for _, e := range celErrors {
 				rf++
 
-				if _, err := fmt.Fprintf(w, "[x] CEL validation error %s, %s : %s\n", r.GroupVersionKind().String(), getResourceName(r), e.Error()); err != nil {
-					return errors.Wrap(err, errWriteOutput)
+				// Try to find the exact line using the error path
+				errorLine := sourceLine
+				if sourceFile != "" && e.Field != "" {
+					exactLine := load.FindPathInYAML(sourceFile, sourceLine, e.Field)
+					if exactLine > 0 {
+						errorLine = exactLine
+					}
+				}
+
+				if sourceFile != "" {
+					if _, err := fmt.Fprintf(w, "[x] %s:%d: CEL validation error %s, %s : %s\n", sourceFile, errorLine, r.GroupVersionKind().String(), getResourceName(r), e.Error()); err != nil {
+						return errors.Wrap(err, errWriteOutput)
+					}
+				} else {
+					if _, err := fmt.Fprintf(w, "[x] CEL validation error %s, %s : %s\n", r.GroupVersionKind().String(), getResourceName(r), e.Error()); err != nil {
+						return errors.Wrap(err, errWriteOutput)
+					}
 				}
 			}
 
@@ -163,8 +219,23 @@ func SchemaValidation(ctx context.Context, resources []*unstructured.Unstructure
 		}
 	}
 
-	if _, err := fmt.Fprintf(w, "Total %d resources: %d missing schemas, %d success cases, %d failure cases\n", len(resources), missingSchemas, len(resources)-failure-missingSchemas, failure); err != nil {
-		return errors.Wrap(err, errWriteOutput)
+	// Print missing schemas summary (always show this, even with --only-invalid)
+	if len(missingGVKs) > 0 {
+		if _, err := fmt.Fprintf(w, "\n[!] Missing schemas for %d resource types (add to --crd-sources):\n", len(missingGVKs)); err != nil {
+			return errors.Wrap(err, errWriteOutput)
+		}
+		for gvk, count := range missingGVKs {
+			if _, err := fmt.Fprintf(w, "    ❌ %s (%d resources)\n", gvk, count); err != nil {
+				return errors.Wrap(err, errWriteOutput)
+			}
+		}
+	}
+
+	// Only print summary if we're showing success logs, or if there are failures/missing schemas
+	if !skipSuccessLogs || failure > 0 || missingSchemas > 0 {
+		if _, err := fmt.Fprintf(w, "Total %d resources: %d missing schemas, %d success cases, %d failure cases\n", len(resources), missingSchemas, len(resources)-failure-missingSchemas, failure); err != nil {
+			return errors.Wrap(err, errWriteOutput)
+		}
 	}
 
 	if failure > 0 {
@@ -176,6 +247,28 @@ func SchemaValidation(ctx context.Context, resources []*unstructured.Unstructure
 	}
 
 	return nil
+}
+
+// filterCELRequiredErrors filters out CEL required field errors for patched fields.
+func filterCELRequiredErrors(errors field.ErrorList, resourceName string, collector *PatchedFieldsCollector) field.ErrorList {
+	if collector == nil {
+		return errors
+	}
+
+	filtered := make(field.ErrorList, 0, len(errors))
+	for _, err := range errors {
+		// Check if this is a "required parameter" CEL error
+		if IsCELRequiredError(err) {
+			// Extract the field path from the error message
+			fieldPath := ExtractRequiredFieldFromCEL(err)
+			if fieldPath != "" && collector.IsFieldPatched(resourceName, fieldPath) {
+				// Skip this error - the field will be patched in
+				continue
+			}
+		}
+		filtered = append(filtered, err)
+	}
+	return filtered
 }
 
 func getResourceName(r *unstructured.Unstructured) string {

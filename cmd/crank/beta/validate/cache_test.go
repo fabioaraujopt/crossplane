@@ -203,7 +203,13 @@ func TestLocalCacheLoad(t *testing.T) {
 			}
 
 			got, err := c.Load(tc.args.image)
-			if diff := cmp.Diff(tc.want.schemas, got); diff != "" {
+
+			// Ignore source tracking annotations added by the loader
+			ignoreSourceAnnotations := cmpopts.IgnoreMapEntries(func(key string, _ interface{}) bool {
+				return key == "annotations"
+			})
+
+			if diff := cmp.Diff(tc.want.schemas, got, ignoreSourceAnnotations); diff != "" {
 				t.Errorf("%s\nLoad(...): -want, +got:\n%s", tc.reason, diff)
 			}
 

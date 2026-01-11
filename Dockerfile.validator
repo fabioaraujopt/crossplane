@@ -1,0 +1,53 @@
+# Multi-stage build for crossplane composition validator
+# Uses Go's native cross-compilation to avoid slow QEMU emulation
+
+# Build stage - runs on host architecture, cross-compiles to target
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+
+# Install build dependencies
+RUN apk add --no-cache git
+
+WORKDIR /workspace
+
+# Copy go mod files first for better caching
+COPY go.mod go.sum ./
+RUN go mod download
+
+# Copy source code
+COPY . .
+
+# TARGETPLATFORM is set by buildx (e.g., linux/amd64, linux/arm64)
+ARG TARGETPLATFORM
+ARG TARGETOS
+ARG TARGETARCH
+
+# Build using Go's native cross-compilation (no QEMU needed!)
+RUN echo "Building for $TARGETPLATFORM ($TARGETOS/$TARGETARCH)" && \
+    CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} go build \
+    -ldflags="-w -s" \
+    -o /bin/crank \
+    ./cmd/crank
+
+# Final stage - minimal runtime image for target platform
+FROM --platform=$TARGETPLATFORM alpine:3.19
+
+# Install ca-certificates for HTTPS connections
+RUN apk add --no-cache ca-certificates
+
+# Copy the cross-compiled binary from builder
+COPY --from=builder /bin/crank /usr/local/bin/crank
+
+# Set non-root user for security
+RUN addgroup -g 65532 -S nonroot && \
+    adduser -u 65532 -S nonroot -G nonroot
+
+USER nonroot
+
+# Set working directory for validation
+WORKDIR /workspace
+
+# Default entrypoint
+ENTRYPOINT ["crank"]
+
+# Default command - run validation help
+CMD ["beta", "validate", "--help"]

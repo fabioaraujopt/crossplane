@@ -1,0 +1,58 @@
+---
+apiVersion: apiextensions.crossplane.io/v1
+kind: CompositeResourceDefinition
+metadata:
+  name: teststamps.test.example.com
+spec:
+  group: test.example.com
+  names:
+    kind: TestStamp
+    plural: teststamps
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              required:
+                - parameters
+              properties:
+                parameters:
+                  type: object
+                  required:
+                    - region
+                  properties:
+                    region:
+                      type: string
+                      description: Cloud region
+                    environment:
+                      type: string
+                      description: Environment name
+                      default: "dev"
+                      enum: ["dev", "staging", "prod"]
+                    unusedParameter:
+                      type: string
+                      description: This parameter is defined but never used in compositions
+                    tags:
+                      type: object
+                      description: Tags to apply
+                      x-kubernetes-preserve-unknown-fields: true
+                    nodePool:
+                      type: object
+                      properties:
+                        minSize:
+                          type: integer
+                          default: 2
+                        maxSize:
+                          type: integer
+                          default: 10
+            status:
+              type: object
+              properties:
+                resourceId:
+                  type: string
+                  description: ID of the created resource
