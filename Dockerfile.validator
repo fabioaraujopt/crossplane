@@ -54,10 +54,11 @@ RUN --mount=type=secret,id=github_token \
     echo "=== Pre-caching CRDs from all sources ===" && \
     mkdir -p /tmp/dummy && touch /tmp/dummy/empty.yaml && \
     GITHUB_TOKEN=$(cat /run/secrets/github_token 2>/dev/null || echo "") && \
-    export GITHUB_TOKEN && \
+    echo "GitHub token length: ${#GITHUB_TOKEN}" && \
     crank beta validate /tmp/dummy /tmp/dummy \
       --prefetch-all-crds \
       --parallel-fetch 5 \
+      --github-token "$GITHUB_TOKEN" \
       --crd-sources "github:PhysicsXLtd/px-operator:main:config/crd/bases" \
       --crd-sources "github:crossplane/crossplane:main:cluster/crds" \
       --crd-sources "github:crossplane-contrib/provider-upjet-aws:main:package/crds" \
