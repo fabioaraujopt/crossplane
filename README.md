@@ -67,9 +67,10 @@ This fork includes a GitHub Action that builds and pushes the validator image on
 
 ## Workflows
 
+- `ci.yml` - Runs tests, linting, and build verification for the validator code
 - `build-validator.yaml` - Builds and pushes the validator Docker image to ECR
 
-Note: We removed the upstream Crossplane CI workflow (protobuf, trivy, e2e tests, etc.) as it's not needed for this fork.
+Note: We replaced the upstream Crossplane CI workflow (protobuf, trivy, e2e tests, etc.) with a simplified version that only tests the validator code.
 
 ## Upstream
 
