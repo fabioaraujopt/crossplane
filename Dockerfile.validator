@@ -57,7 +57,7 @@ RUN --mount=type=secret,id=github_token \
       --prefetch-all-crds \
       --parallel-fetch 5 \
       --github-token "$GITHUB_TOKEN" \
-      --crd-sources "github:PhysicsXLtd/px-operator:main:config/crd/bases" \
+      --crd-sources "github-private:PhysicsXLtd/px-operator:main:config/crd/bases" \
       --crd-sources "github:crossplane/crossplane:main:cluster/crds" \
       --crd-sources "github:crossplane-contrib/provider-upjet-aws:main:package/crds" \
       --crd-sources "github:crossplane-contrib/provider-upjet-azure:main:package/crds" \

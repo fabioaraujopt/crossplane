@@ -43,6 +43,16 @@ const (
 	defaultRetryMaxDelay  = 10 * time.Second
 )
 
+// formatGVK formats a group, version, and kind into a GVK string.
+// For core K8s types (empty group), it returns "version, Kind=kind".
+// For other types, it returns "group/version, Kind=kind".
+func formatGVK(group, version, kind string) string {
+	if group == "" {
+		return fmt.Sprintf("%s, Kind=%s", version, kind)
+	}
+	return fmt.Sprintf("%s/%s, Kind=%s", group, version, kind)
+}
+
 // httpDoWithRetry performs an HTTP request with retry logic for transient errors.
 // It retries on 5xx errors, connection errors, and timeouts with exponential backoff.
 func httpDoWithRetry(ctx context.Context, client *http.Client, req *http.Request) (*http.Response, error) {
@@ -132,8 +142,10 @@ func waitForRetry(ctx context.Context, attempt int) {
 type CRDSourceType string
 
 const (
-	// CRDSourceTypeGitHub fetches CRDs from a GitHub repository.
+	// CRDSourceTypeGitHub fetches CRDs from a PUBLIC GitHub repository (no auth).
 	CRDSourceTypeGitHub CRDSourceType = "github"
+	// CRDSourceTypeGitHubPrivate fetches CRDs from a PRIVATE GitHub repository (uses auth).
+	CRDSourceTypeGitHubPrivate CRDSourceType = "github-private"
 	// CRDSourceTypeCatalog fetches CRDs from the Datree CRDs catalog.
 	CRDSourceTypeCatalog CRDSourceType = "catalog"
 	// CRDSourceTypeLocal loads CRDs from a local directory.
@@ -150,6 +162,7 @@ type CRDSource struct {
 	Location string // URL, path, or repo reference
 	Branch   string // For GitHub sources
 	Path     string // Path within repo for GitHub sources
+	Private  bool   // For GitHub sources - whether to use auth (private repos)
 }
 
 // ParseCRDSource parses a CRD source string into a CRDSource struct.
@@ -170,18 +183,24 @@ func ParseCRDSource(source string) (CRDSource, error) {
 
 	sourceType := parts[0]
 	switch sourceType {
-	case "github":
-		// github:org/repo:branch:path
+	case "github", "github-private":
+		// github:org/repo:branch:path or github-private:org/repo:branch:path
 		rest := parts[1]
 		githubParts := strings.SplitN(rest, ":", 3)
 		if len(githubParts) < 3 {
 			return CRDSource{}, fmt.Errorf("invalid github source: %s (expected github:org/repo:branch:path)", source)
 		}
+		isPrivate := sourceType == "github-private"
+		srcType := CRDSourceTypeGitHub
+		if isPrivate {
+			srcType = CRDSourceTypeGitHubPrivate
+		}
 		return CRDSource{
-			Type:     CRDSourceTypeGitHub,
+			Type:     srcType,
 			Location: githubParts[0],
 			Branch:   githubParts[1],
 			Path:     githubParts[2],
+			Private:  isPrivate,
 		}, nil
 
 	case "local":
@@ -204,7 +223,7 @@ func ParseCRDSource(source string) (CRDSource, error) {
 		}, nil
 
 	default:
-		return CRDSource{}, fmt.Errorf("unknown source type: %s (supported: github, local, catalog, cluster, k8s)", sourceType)
+		return CRDSource{}, fmt.Errorf("unknown source type: %s (supported: github, github-private, local, catalog, cluster, k8s)", sourceType)
 	}
 }
 
@@ -335,14 +354,10 @@ func (f *CRDSourceFetcher) addGitHubHeaders(req *http.Request, withAuth bool) {
 }
 
 // doGitHubRequest performs a GitHub API request.
-// For api.github.com: ALWAYS use auth (to avoid rate limiting - 60 req/hr without, 5000 with)
-// For raw.githubusercontent.com: try without auth first, then with auth on 404 (private repo)
-func (f *CRDSourceFetcher) doGitHubRequest(ctx context.Context, url string) (*http.Response, error) {
-	isAPIRequest := strings.Contains(url, "api.github.com")
-	
-	// For API requests, always use auth to avoid rate limiting
-	// For raw content, try without auth first (works for public repos without rate limits)
-	useAuth := isAPIRequest && f.githubToken != ""
+// - isPrivate=true: Always use auth (for private repos)
+// - isPrivate=false: Never use auth (for public repos - avoids SSO issues)
+func (f *CRDSourceFetcher) doGitHubRequest(ctx context.Context, url string, isPrivate bool) (*http.Response, error) {
+	useAuth := isPrivate && f.githubToken != ""
 	
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
@@ -355,17 +370,13 @@ func (f *CRDSourceFetcher) doGitHubRequest(ctx context.Context, url string) (*ht
 		return nil, err
 	}
 
-	// If 404 and we have a token and didn't use it yet, retry WITH auth (might be private repo)
-	if resp.StatusCode == http.StatusNotFound && f.githubToken != "" && !useAuth {
+	// For private repos, provide helpful error messages
+	if isPrivate && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
 		resp.Body.Close()
-
-		req2, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-		if err != nil {
-			return nil, err
+		if f.githubToken == "" {
+			return nil, fmt.Errorf("GitHub API returned HTTP %d - private repo requires --github-token", resp.StatusCode)
 		}
-		f.addGitHubHeaders(req2, true) // With auth
-
-		return httpDoWithRetry(ctx, f.httpClient, req2)
+		return nil, fmt.Errorf("GitHub API returned HTTP %d - token may lack permissions for this private repo", resp.StatusCode)
 	}
 
 	return resp, nil
@@ -461,7 +472,7 @@ func (f *CRDSourceFetcher) PrefetchAllFromSources(ctx context.Context, sources [
 // prefetchAllFromSource fetches ALL CRDs from a single source (not just required ones).
 func (f *CRDSourceFetcher) prefetchAllFromSource(ctx context.Context, source CRDSource) ([]*extv1.CustomResourceDefinition, error) {
 	switch source.Type {
-	case CRDSourceTypeGitHub:
+	case CRDSourceTypeGitHub, CRDSourceTypeGitHubPrivate:
 		return f.prefetchAllFromGitHub(ctx, source)
 	case CRDSourceTypeLocal:
 		return f.prefetchAllFromLocal(source)
@@ -490,8 +501,8 @@ func (f *CRDSourceFetcher) prefetchAllFromGitHub(ctx context.Context, source CRD
 	refURL := fmt.Sprintf("https://api.github.com/repos/%s/git/ref/heads/%s",
 		source.Location, source.Branch)
 
-	resp, err := f.doGitHubRequest(ctx, refURL)
-	if err != nil {
+	resp, err := f.doGitHubRequest(ctx, refURL, source.Private)
+		if err != nil {
 		return nil, fmt.Errorf("GitHub API request failed for %s: %w", refURL, err)
 	}
 	defer resp.Body.Close()
@@ -513,7 +524,7 @@ func (f *CRDSourceFetcher) prefetchAllFromGitHub(ctx context.Context, source CRD
 	treeURL := fmt.Sprintf("https://api.github.com/repos/%s/git/trees/%s?recursive=1",
 		source.Location, refData.Object.SHA)
 
-	resp2, err := f.doGitHubRequest(ctx, treeURL)
+	resp2, err := f.doGitHubRequest(ctx, treeURL, source.Private)
 	if err != nil {
 		return nil, fmt.Errorf("GitHub API request failed for tree: %w", err)
 	}
@@ -575,6 +586,7 @@ func (f *CRDSourceFetcher) prefetchAllFromGitHub(ctx context.Context, source CRD
 	sem := make(chan struct{}, f.parallelism)
 	var wg sync.WaitGroup
 
+	isPrivate := source.Private
 	for _, file := range yamlFiles {
 		wg.Add(1)
 		go func(name, downloadURL string) {
@@ -582,7 +594,7 @@ func (f *CRDSourceFetcher) prefetchAllFromGitHub(ctx context.Context, source CRD
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			fetchedCRDs, err := f.fetchCRDsFromURL(ctx, downloadURL)
+			fetchedCRDs, err := f.fetchCRDsFromURL(ctx, downloadURL, isPrivate)
 			if err != nil {
 				crdResults <- crdResult{err: err, url: downloadURL}
 				return
@@ -762,8 +774,8 @@ func (f *CRDSourceFetcher) loadAllFromCache(cachePath string) ([]*extv1.CustomRe
 // Uses parallel fetching to speed up the process.
 func (f *CRDSourceFetcher) FetchFromSources(ctx context.Context, sources []CRDSource, requiredGVKs map[string]bool) ([]*extv1.CustomResourceDefinition, error) {
 	if _, err := fmt.Fprintf(f.writer, "\n=== CRD Source Discovery ===\n"); err != nil {
-		return nil, errors.Wrap(err, "cannot write output")
-	}
+				return nil, errors.Wrap(err, "cannot write output")
+			}
 	if _, err := fmt.Fprintf(f.writer, "Looking for %d required CRDs from %d sources (parallel=%d)...\n\n", len(requiredGVKs), len(sources), f.parallelism); err != nil {
 		return nil, errors.Wrap(err, "cannot write output")
 	}
@@ -815,7 +827,7 @@ func (f *CRDSourceFetcher) FetchFromSources(ctx context.Context, sources []CRDSo
 			// Deduplicate CRDs based on GVK
 			for _, crd := range result.crds {
 				for _, version := range crd.Spec.Versions {
-					gvk := fmt.Sprintf("%s/%s, Kind=%s", crd.Spec.Group, version.Name, crd.Spec.Names.Kind)
+					gvk := formatGVK(crd.Spec.Group, version.Name, crd.Spec.Names.Kind)
 					if !foundGVKs[gvk] {
 						foundGVKs[gvk] = true
 						allCRDs = append(allCRDs, crd)
@@ -873,7 +885,7 @@ func (f *CRDSourceFetcher) GetMissingGVKs(requiredGVKs, foundGVKs map[string]boo
 
 func (f *CRDSourceFetcher) fetchFromSource(ctx context.Context, source CRDSource, requiredGVKs, foundGVKs map[string]bool) ([]*extv1.CustomResourceDefinition, error) {
 	switch source.Type {
-	case CRDSourceTypeGitHub:
+	case CRDSourceTypeGitHub, CRDSourceTypeGitHubPrivate:
 		return f.fetchFromGitHub(ctx, source, requiredGVKs, foundGVKs)
 	case CRDSourceTypeCatalog:
 		return f.fetchFromCatalog(ctx, source, requiredGVKs, foundGVKs)
@@ -942,7 +954,7 @@ func (f *CRDSourceFetcher) fetchFromGitHub(ctx context.Context, source CRDSource
 			rawURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s/%s", 
 				source.Location, source.Branch, source.Path, name)
 
-			crd, err := f.fetchCRDFromURL(ctx, rawURL)
+			crd, err := f.fetchCRDFromURL(ctx, rawURL, source.Private)
 			if err != nil {
 				// Track auth errors (401, 403) - these indicate token issues
 				errStr := err.Error()
@@ -956,16 +968,16 @@ func (f *CRDSourceFetcher) fetchFromGitHub(ctx context.Context, source CRDSource
 			if crd == nil {
 				continue
 			}
-			// Verify this is the right CRD
-			if crd.Spec.Group == group && crd.Spec.Names.Kind == kind {
-				crds = append(crds, crd)
-				foundGVKs[gvk] = true
-				// Cache the CRD
-				f.saveCRDToCache(cachePath, name, crd)
-				break
+				// Verify this is the right CRD
+				if crd.Spec.Group == group && crd.Spec.Names.Kind == kind {
+					crds = append(crds, crd)
+					foundGVKs[gvk] = true
+					// Cache the CRD
+					f.saveCRDToCache(cachePath, name, crd)
+					break
+				}
 			}
 		}
-	}
 
 	// If no CRDs found and we had auth errors, report the auth issue
 	// This ensures users know WHY the private repo fetch failed
@@ -1018,14 +1030,15 @@ func (f *CRDSourceFetcher) fetchFromCatalog(ctx context.Context, source CRDSourc
 		}
 
 		// Try each URL until one works
+		// Catalog is always public, so isPrivate=false
 		for _, url := range urls {
-			crd, err := f.fetchCRDFromURL(ctx, url)
+			crd, err := f.fetchCRDFromURL(ctx, url, false)
 			if err != nil || crd == nil {
 				continue
 			}
-			crds = append(crds, crd)
-			foundGVKs[gvk] = true
-			break
+				crds = append(crds, crd)
+				foundGVKs[gvk] = true
+				break
 		}
 	}
 
@@ -1067,7 +1080,7 @@ func (f *CRDSourceFetcher) fetchFromLocal(source CRDSource, requiredGVKs, foundG
 
 		// Check if this CRD is needed
 		for _, version := range crd.Spec.Versions {
-			gvk := fmt.Sprintf("%s/%s, Kind=%s", crd.Spec.Group, version.Name, crd.Spec.Names.Kind)
+			gvk := formatGVK(crd.Spec.Group, version.Name, crd.Spec.Names.Kind)
 			if requiredGVKs[gvk] && !foundGVKs[gvk] {
 				crds = append(crds, &crd)
 				foundGVKs[gvk] = true
@@ -1080,8 +1093,8 @@ func (f *CRDSourceFetcher) fetchFromLocal(source CRDSource, requiredGVKs, foundG
 	return crds, err
 }
 
-func (f *CRDSourceFetcher) fetchCRDFromURL(ctx context.Context, url string) (*extv1.CustomResourceDefinition, error) {
-	crds, err := f.fetchCRDsFromURL(ctx, url)
+func (f *CRDSourceFetcher) fetchCRDFromURL(ctx context.Context, url string, isPrivate bool) (*extv1.CustomResourceDefinition, error) {
+	crds, err := f.fetchCRDsFromURL(ctx, url, isPrivate)
 	if err != nil {
 		return nil, err
 	}
@@ -1092,28 +1105,28 @@ func (f *CRDSourceFetcher) fetchCRDFromURL(ctx context.Context, url string) (*ex
 }
 
 // fetchCRDsFromURL fetches CRDs from a URL, handling multi-document YAML files.
-// For private GitHub repos, it tries raw URL first, then falls back to API with auth on 404.
-func (f *CRDSourceFetcher) fetchCRDsFromURL(ctx context.Context, url string) ([]*extv1.CustomResourceDefinition, error) {
+// isPrivate: if true, uses GitHub API with auth for private repos.
+func (f *CRDSourceFetcher) fetchCRDsFromURL(ctx context.Context, url string, isPrivate bool) ([]*extv1.CustomResourceDefinition, error) {
+	// For private repos, use GitHub API with auth instead of raw URLs
+	if isPrivate && strings.Contains(url, "raw.githubusercontent.com") {
+		apiURL, err := convertRawURLToAPI(url)
+		if err != nil {
+			return nil, fmt.Errorf("failed to convert raw URL to API: %w", err)
+		}
+		return f.fetchCRDsFromGitHubAPI(ctx, apiURL)
+	}
+
+	// For public repos, just use the raw URL without auth
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
 	}
 
-	// Use retry logic to handle transient errors (5xx, timeouts, etc.)
 	resp, err := httpDoWithRetry(ctx, f.httpClient, req)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch CRD from %s: %w", url, err)
 	}
 	defer resp.Body.Close()
-
-	// If 404 and we have a token, try GitHub API (might be private repo)
-	if resp.StatusCode == http.StatusNotFound && f.githubToken != "" && strings.Contains(url, "raw.githubusercontent.com") {
-		resp.Body.Close()
-		apiURL, err := convertRawURLToAPI(url)
-		if err == nil {
-			return f.fetchCRDsFromGitHubAPI(ctx, apiURL)
-		}
-	}
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
@@ -1132,7 +1145,7 @@ func (f *CRDSourceFetcher) fetchCRDsFromURL(ctx context.Context, url string) ([]
 		if doc == "" {
 			continue
 		}
-		var crd extv1.CustomResourceDefinition
+	var crd extv1.CustomResourceDefinition
 		if err := yaml.Unmarshal([]byte(doc), &crd); err != nil {
 			continue // Skip non-CRD documents
 		}
@@ -1177,7 +1190,7 @@ func (f *CRDSourceFetcher) fetchCRDsFromGitHubAPI(ctx context.Context, apiURL st
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Always use auth - this is only called for private repos
 	f.addGitHubHeaders(req, true)
 	
@@ -1463,7 +1476,7 @@ func (f *CRDSourceFetcher) loadFromCache(cachePath string, requiredGVKs, foundGV
 
 		// Check if this CRD is needed
 		for _, version := range crd.Spec.Versions {
-			gvk := fmt.Sprintf("%s/%s, Kind=%s", crd.Spec.Group, version.Name, crd.Spec.Names.Kind)
+			gvk := formatGVK(crd.Spec.Group, version.Name, crd.Spec.Names.Kind)
 			if requiredGVKs[gvk] && !foundGVKs[gvk] {
 				crds = append(crds, &crd)
 				foundGVKs[gvk] = true
@@ -1551,17 +1564,23 @@ func parseSingleSource(spec string) (CRDSource, error) {
 	location := parts[1]
 
 	switch sourceTypeStr {
-	case "github":
-		// Format: github:owner/repo:branch:path
+	case "github", "github-private":
+		// Format: github:owner/repo:branch:path or github-private:owner/repo:branch:path
 		githubParts := strings.SplitN(location, ":", 3)
 		if len(githubParts) < 1 {
 			return CRDSource{}, fmt.Errorf("invalid GitHub source: %s", spec)
 		}
+		isPrivate := sourceTypeStr == "github-private"
+		srcType := CRDSourceTypeGitHub
+		if isPrivate {
+			srcType = CRDSourceTypeGitHubPrivate
+		}
 		source := CRDSource{
-			Type:     CRDSourceTypeGitHub,
+			Type:     srcType,
 			Location: githubParts[0],
 			Branch:   "main",
 			Path:     "package/crds",
+			Private:  isPrivate,
 		}
 		if len(githubParts) > 1 {
 			source.Branch = githubParts[1]
