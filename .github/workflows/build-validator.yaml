@@ -4,10 +4,6 @@ on:
   push:
     branches:
       - main
-    paths:
-      - 'cmd/crank/beta/validate/**'
-      - 'Dockerfile.validator'
-      - '.github/workflows/build-validator.yaml'
   workflow_dispatch:  # Allow manual trigger
 
 permissions:
