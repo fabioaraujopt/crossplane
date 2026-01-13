@@ -290,6 +290,7 @@ type CRDSourceFetcher struct {
 	httpClient  *http.Client
 	writer      io.Writer
 	parallelism int
+	githubToken string // GitHub personal access token for private repos
 }
 
 // NewCRDSourceFetcher creates a new CRDSourceFetcher.
@@ -301,6 +302,19 @@ func NewCRDSourceFetcher(cacheDir string, w io.Writer) *CRDSourceFetcher {
 		},
 		writer:      w,
 		parallelism: 10, // default
+	}
+}
+
+// SetGitHubToken sets the GitHub token for accessing private repositories.
+func (f *CRDSourceFetcher) SetGitHubToken(token string) {
+	f.githubToken = token
+}
+
+// addGitHubHeaders adds required headers for GitHub API requests, including auth if token is set.
+func (f *CRDSourceFetcher) addGitHubHeaders(req *http.Request) {
+	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	if f.githubToken != "" {
+		req.Header.Set("Authorization", "token "+f.githubToken)
 	}
 }
 
@@ -427,7 +441,7 @@ func (f *CRDSourceFetcher) prefetchAllFromGitHub(ctx context.Context, source CRD
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
+	f.addGitHubHeaders(req)
 
 	resp, err := httpDoWithRetry(ctx, f.httpClient, req)
 	if err != nil {
@@ -456,7 +470,7 @@ func (f *CRDSourceFetcher) prefetchAllFromGitHub(ctx context.Context, source CRD
 	if err != nil {
 		return nil, err
 	}
-	req2.Header.Set("Accept", "application/vnd.github.v3+json")
+	f.addGitHubHeaders(req2)
 
 	resp2, err := httpDoWithRetry(ctx, f.httpClient, req2)
 	if err != nil {
@@ -1016,6 +1030,11 @@ func (f *CRDSourceFetcher) fetchCRDsFromURL(ctx context.Context, url string) ([]
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
+	}
+
+	// Add auth header for GitHub raw content (works for private repos)
+	if strings.Contains(url, "githubusercontent.com") && f.githubToken != "" {
+		req.Header.Set("Authorization", "token "+f.githubToken)
 	}
 
 	// Use retry logic to handle transient errors (5xx, timeouts, etc.)

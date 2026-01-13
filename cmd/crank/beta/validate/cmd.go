@@ -73,6 +73,7 @@ type Cmd struct {
 	CleanCRDCache    bool     `default:"false" help:"Clean the CRD source cache before fetching. Forces re-download of all CRDs."`
 	PrefetchAllCRDs  bool     `name:"prefetch-all-crds" default:"false" help:"Download ALL CRDs from each source, not just those needed for validation. Useful for pre-caching in Docker images."`
 	ParallelFetch    int      `name:"parallel-fetch" default:"10"    help:"Number of parallel CRD fetch operations. Higher values speed up downloads but use more connections."`
+	GitHubToken      string   `name:"github-token" env:"GITHUB_TOKEN" help:"GitHub personal access token for accessing private repositories. Can also be set via GITHUB_TOKEN environment variable."`
 
 	fs afero.Fs
 }
@@ -275,6 +276,12 @@ func (c *Cmd) Run(k *kong.Context, _ logging.Logger) error {
 		// Create fetcher with parallel option
 		sourceFetcher := NewCRDSourceFetcher(c.CacheDir, k.Stdout)
 		sourceFetcher.SetParallelism(c.ParallelFetch)
+		if c.GitHubToken != "" {
+			sourceFetcher.SetGitHubToken(c.GitHubToken)
+			if _, err := fmt.Fprintf(k.Stdout, "Using GitHub token for private repository access\n"); err != nil {
+				return errors.Wrap(err, "cannot write output")
+			}
+		}
 
 		// Clean cache if requested
 		if c.CleanCRDCache {
