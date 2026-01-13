@@ -79,7 +79,6 @@ RUN --mount=type=secret,id=github_token \
       --crd-sources "github:open-telemetry/opentelemetry-operator:main:config/crd/bases" \
       --crd-sources "github:external-secrets/external-secrets:main:config/crds/bases" \
       --crd-sources "github:alexandrevilain/temporal-operator:main:charts/temporal-operator/crds" \
-      --crd-sources "catalog:https://raw.githubusercontent.com/datreeio/CRDs-catalog/main" \
       --crd-sources "k8s:v1.34.0" \
       --skip-success-results 2>&1 || true && \
     echo "" && \
