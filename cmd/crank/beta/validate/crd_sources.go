@@ -18,6 +18,7 @@ package validate
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -1026,15 +1027,21 @@ func (f *CRDSourceFetcher) fetchCRDFromURL(ctx context.Context, url string) (*ex
 }
 
 // fetchCRDsFromURL fetches CRDs from a URL, handling multi-document YAML files.
+// For private GitHub repos, it converts raw.githubusercontent.com URLs to GitHub API calls.
 func (f *CRDSourceFetcher) fetchCRDsFromURL(ctx context.Context, url string) ([]*extv1.CustomResourceDefinition, error) {
+	// For private repos, raw.githubusercontent.com doesn't work with tokens
+	// Convert to GitHub API: https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}
+	if strings.Contains(url, "raw.githubusercontent.com") && f.githubToken != "" {
+		apiURL, err := convertRawURLToAPI(url)
+		if err == nil {
+			return f.fetchCRDsFromGitHubAPI(ctx, apiURL)
+		}
+		// If conversion fails, fall through to regular fetch
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
-	}
-
-	// Add auth header for GitHub raw content (works for private repos)
-	if strings.Contains(url, "githubusercontent.com") && f.githubToken != "" {
-		req.Header.Set("Authorization", "token "+f.githubToken)
 	}
 
 	// Use retry logic to handle transient errors (5xx, timeouts, etc.)
@@ -1071,6 +1078,90 @@ func (f *CRDSourceFetcher) fetchCRDsFromURL(ctx context.Context, url string) ([]
 		}
 	}
 
+	return crds, nil
+}
+
+// convertRawURLToAPI converts a raw.githubusercontent.com URL to a GitHub API URL.
+// Example: https://raw.githubusercontent.com/owner/repo/branch/path/file.yaml
+// -> https://api.github.com/repos/owner/repo/contents/path/file.yaml?ref=branch
+func convertRawURLToAPI(rawURL string) (string, error) {
+	// Parse: https://raw.githubusercontent.com/{owner}/{repo}/{branch}/{path}
+	prefix := "https://raw.githubusercontent.com/"
+	if !strings.HasPrefix(rawURL, prefix) {
+		return "", fmt.Errorf("not a raw GitHub URL")
+	}
+	
+	rest := strings.TrimPrefix(rawURL, prefix)
+	parts := strings.SplitN(rest, "/", 4) // owner, repo, branch, path
+	if len(parts) < 4 {
+		return "", fmt.Errorf("invalid raw GitHub URL format")
+	}
+	
+	owner := parts[0]
+	repo := parts[1]
+	branch := parts[2]
+	path := parts[3]
+	
+	return fmt.Sprintf("https://api.github.com/repos/%s/%s/contents/%s?ref=%s", 
+		owner, repo, path, branch), nil
+}
+
+// fetchCRDsFromGitHubAPI fetches CRDs using the GitHub API (works with private repos).
+func (f *CRDSourceFetcher) fetchCRDsFromGitHubAPI(ctx context.Context, apiURL string) ([]*extv1.CustomResourceDefinition, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	
+	// Add GitHub auth headers
+	f.addGitHubHeaders(req)
+	
+	resp, err := httpDoWithRetry(ctx, f.httpClient, req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GitHub API returned HTTP %d", resp.StatusCode)
+	}
+	
+	// GitHub API returns JSON with content field (base64 encoded)
+	var apiResp struct {
+		Content  string `json:"content"`
+		Encoding string `json:"encoding"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+		return nil, fmt.Errorf("failed to decode GitHub API response: %w", err)
+	}
+	
+	if apiResp.Encoding != "base64" {
+		return nil, fmt.Errorf("unexpected encoding: %s", apiResp.Encoding)
+	}
+	
+	// Decode base64 content
+	data, err := base64.StdEncoding.DecodeString(strings.ReplaceAll(apiResp.Content, "\n", ""))
+	if err != nil {
+		return nil, fmt.Errorf("failed to decode base64 content: %w", err)
+	}
+	
+	// Parse YAML (handle multi-document)
+	var crds []*extv1.CustomResourceDefinition
+	docs := strings.Split(string(data), "\n---")
+	for _, doc := range docs {
+		doc = strings.TrimSpace(doc)
+		if doc == "" {
+			continue
+		}
+		var crd extv1.CustomResourceDefinition
+		if err := yaml.Unmarshal([]byte(doc), &crd); err != nil {
+			continue // Skip non-CRD documents
+		}
+		if crd.Name != "" && crd.Spec.Names.Kind != "" {
+			crds = append(crds, &crd)
+		}
+	}
+	
 	return crds, nil
 }
 
