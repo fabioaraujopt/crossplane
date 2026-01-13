@@ -668,10 +668,17 @@ func (f *CRDSourceFetcher) prefetchAllK8sSchemas(ctx context.Context, source CRD
 		close(results)
 	}()
 
+	// Create cache directory for k8s schemas
+	cacheKey := fmt.Sprintf("k8s-%s", k8sVersion)
+	cachePath := filepath.Join(f.cacheDir, "crd-sources", cacheKey)
+
 	var crds []*extv1.CustomResourceDefinition
 	for result := range results {
 		if result.err == nil && result.crd != nil {
 			crds = append(crds, result.crd)
+			// Save to cache for later use
+			filename := fmt.Sprintf("%s.yaml", strings.ToLower(result.crd.Spec.Names.Kind))
+			f.saveCRDToCache(cachePath, filename, result.crd)
 		}
 		// Silently skip errors for individual schemas
 	}
@@ -1199,6 +1206,17 @@ func (f *CRDSourceFetcher) fetchFromK8sSchemas(ctx context.Context, source CRDSo
 		k8sVersion = "v1.29.0" // default
 	}
 
+	// Check cache first
+	cacheKey := fmt.Sprintf("k8s-%s", k8sVersion)
+	cachePath := filepath.Join(f.cacheDir, "crd-sources", cacheKey)
+
+	if crds, ok := f.loadK8sFromCache(cachePath, requiredGVKs, foundGVKs); ok {
+		if _, err := fmt.Fprintf(f.writer, "Loaded K8s schemas from cache: %s\n", k8sVersion); err != nil {
+			return nil, errors.Wrap(err, "cannot write output")
+		}
+		return crds, nil
+	}
+
 	if _, err := fmt.Fprintf(f.writer, "Fetching K8s schemas from kubernetes-json-schema (%s)...\n", k8sVersion); err != nil {
 		return nil, errors.Wrap(err, "cannot write output")
 	}
@@ -1223,10 +1241,56 @@ func (f *CRDSourceFetcher) fetchFromK8sSchemas(ctx context.Context, source CRDSo
 		if err == nil && crd != nil {
 			crds = append(crds, crd)
 			foundGVKs[gvk] = true
+			// Save to cache
+			filename := fmt.Sprintf("%s.yaml", kindLower)
+			f.saveCRDToCache(cachePath, filename, crd)
 		}
 	}
 
 	return crds, nil
+}
+
+// loadK8sFromCache loads K8s schemas from cache.
+func (f *CRDSourceFetcher) loadK8sFromCache(cachePath string, requiredGVKs, foundGVKs map[string]bool) ([]*extv1.CustomResourceDefinition, bool) {
+	if _, err := os.Stat(cachePath); os.IsNotExist(err) {
+		return nil, false
+	}
+
+	var crds []*extv1.CustomResourceDefinition
+	foundAny := false
+
+	for gvk := range requiredGVKs {
+		if foundGVKs[gvk] {
+			continue
+		}
+
+		coreType, ok := CoreK8sTypes[gvk]
+		if !ok {
+			continue // Not a core K8s type
+		}
+
+		// Try to load from cache
+		kindLower := strings.ToLower(coreType.Kind)
+		cacheFile := filepath.Join(cachePath, fmt.Sprintf("%s.yaml", kindLower))
+
+		data, err := os.ReadFile(cacheFile)
+		if err != nil {
+			continue
+		}
+
+		var crd extv1.CustomResourceDefinition
+		if err := yaml.Unmarshal(data, &crd); err != nil {
+			continue
+		}
+
+		if crd.Kind == "CustomResourceDefinition" {
+			crds = append(crds, &crd)
+			foundGVKs[gvk] = true
+			foundAny = true
+		}
+	}
+
+	return crds, foundAny
 }
 
 // fetchJSONSchemaAsCRD fetches a JSON schema and converts it to a CRD for validation.
