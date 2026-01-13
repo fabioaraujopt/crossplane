@@ -66,16 +66,16 @@ RUN echo "=== Pre-caching CRDs from all sources ===" && \
       --crd-sources "github:crossplane-contrib/function-patch-and-transform:main:package/input" \
       --crd-sources "github:crossplane-contrib/function-sequencer:main:package/input" \
       --crd-sources "github:crossplane-contrib/function-tag-manager:main:package/input" \
-      --crd-sources "github:istio/istio:master:manifests/charts/base/crds" \
+      --crd-sources "github:istio/istio:master:manifests/charts/base/files" \
       --crd-sources "github:aws/karpenter-provider-aws:main:pkg/apis/crds" \
       --crd-sources "github:Azure/karpenter-provider-azure:main:charts/karpenter/crds" \
       --crd-sources "github:kubernetes-sigs/karpenter:main:pkg/apis/crds" \
       --crd-sources "github:cert-manager/cert-manager:master:deploy/crds" \
       --crd-sources "github:vmware-tanzu/velero:main:config/crd/v1/bases" \
-      --crd-sources "github:nats-io/nack:main:deploy/crds" \
+      --crd-sources "github:nats-io/nack:main:deploy" \
       --crd-sources "github:open-telemetry/opentelemetry-operator:main:config/crd/bases" \
       --crd-sources "github:external-secrets/external-secrets:main:config/crds/bases" \
-      --crd-sources "github:temporalio/temporal-operator:main:config/crd/bases" \
+      --crd-sources "github:alexandrevilain/temporal-operator:main:charts/temporal-operator/crds" \
       --crd-sources "catalog:https://raw.githubusercontent.com/datreeio/CRDs-catalog/main" \
       --crd-sources "k8s:v1.34.0" \
       --skip-success-results 2>&1 || true && \
