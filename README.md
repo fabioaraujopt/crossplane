@@ -1,151 +1,83 @@
-[![OpenSSF Best Practices](https://www.bestpractices.dev/projects/3260/badge)](https://www.bestpractices.dev/projects/3260) ![CI](https://github.com/crossplane/crossplane/workflows/CI/badge.svg) [![Go Report Card](https://goreportcard.com/badge/github.com/crossplane/crossplane)](https://goreportcard.com/report/github.com/crossplane/crossplane)
+# Crossplane Composition Validator (PhysicsX Fork)
 
-![Crossplane](banner.png)
+This is a fork of [Crossplane](https://github.com/crossplane/crossplane) maintained by PhysicsX for the **Composition Validator** tool.
 
-Crossplane is a framework for building cloud native control planes without
-needing to write code. It has a highly extensible backend that enables you to
-build a control plane that can orchestrate applications and infrastructure no
-matter where they run, and a highly configurable frontend that puts you in
-control of the schema of the declarative API it offers.
+## Why This Fork?
 
-Crossplane is a [Cloud Native Computing Foundation][cncf] project.
+We've developed an enhanced `crossplane beta validate` command with additional features for validating Crossplane Compositions:
 
-## Get Started
+### Features Added
 
-Crossplane's [Get Started Docs] covers install and resource quickstarts.
+1. **Comprehensive Patch Validation**
+   - Validates `fromFieldPath` and `toFieldPath` exist in their respective schemas
+   - Catches typos in patch paths before runtime errors
 
-## Releases
+2. **Unused Parameter Detection**
+   - Identifies XRD parameters defined but never used in composition patches
+   - Helps eliminate dead configuration code
 
-[![GitHub release](https://img.shields.io/github/release/crossplane/crossplane/all.svg)](https://github.com/crossplane/crossplane/releases) [![Artifact Hub](https://img.shields.io/endpoint?url=https://artifacthub.io/badge/repository/crossplane)](https://artifacthub.io/packages/helm/crossplane/crossplane)
+3. **Status Chain Validation** (`--validate-status-chains`)
+   - Validates status field propagation through composition hierarchies
+   - Ensures parent compositions correctly read from child XR status fields
 
-Currently maintained releases, as well as the next few upcoming releases are
-listed below. For more information take a look at the Crossplane [release cycle
-documentation].
+4. **CRD Source Discovery** (`--crd-sources`)
+   - Fetch CRDs from GitHub repos, local directories, or the Datree catalog
+   - Parallel fetching for fast downloads (10+ concurrent connections)
+   - Automatic caching of downloaded CRDs
 
-| Release | Release Date  |   EOL    |
-|:-------:|:-------------:|:--------:|
-|  v1.19  | Feb 11, 2025  | Nov 2025 |
-|  v1.20  | May 21, 2025  | Feb 2026 |
-|  v2.0   |  Aug 8, 2025  | May 2026 |
-|  v2.1   | Early Nov '25 | Aug 2026 |
-|  v2.2   | Early Feb '26 | Nov 2026 |
-|  v2.3   | Early May '26 | Feb 2027 |
+5. **Function Input Validation** (`--validate-function-inputs`)
+   - Downloads function packages and validates pipeline inputs against their schemas
 
-You can subscribe to the [community calendar] to track all release dates, and
-find the most recent releases on the [releases] page.
+6. **Strict Mode** (`--strict-mode`)
+   - Treats warnings as errors for CI/CD pipelines
 
-## Roadmap
+## Usage
 
-The public roadmap for Crossplane is published as a GitHub project board. Issues
-added to the roadmap have been triaged and identified as valuable to the
-community, and therefore a priority for the project that we expect to invest in.
+```bash
+# Basic validation
+crossplane beta validate extensions/ resources/
 
-The maintainer team regularly triages requests from the community to identify
-features and issues of suitable scope and impact to include in this roadmap. The
-community is encouraged to show their support for potential roadmap issues by
-adding a :+1: reaction, leaving descriptive comments, and attending the
-[regular community meetings] to discuss their requirements and use cases.
+# With all CRD sources
+crossplane beta validate extensions/ resources/ \
+  --crd-sources "github:crossplane/crossplane:main:cluster/crds" \
+  --crd-sources "github:crossplane-contrib/provider-upjet-aws:main:package/crds" \
+  --crd-sources "github:upbound/provider-vault:main:package/crds" \
+  --crd-sources "k8s:v1.34.0" \
+  --validate-status-chains \
+  --only-invalid
+```
 
-The maintainer team updates the roadmap on an as needed basis, in response to
-demand, priority, and available resources. The public roadmap can be updated at
-any time.
+## Docker Image
 
-Milestones assigned to any issues in the roadmap are intended to give a sense of
-overall priority and the expected order of delivery. They should be considered
-approximate estimations and are **not** a strict commitment to a specific
-delivery timeline.
+The validator is available as a Docker image from ECR:
 
-[Crossplane Roadmap]
+```bash
+docker pull 585768152950.dkr.ecr.us-east-1.amazonaws.com/crossplane-validator:latest
+```
 
-## Get Involved
+The image pre-caches 2000+ CRDs for instant validation.
 
-[![Slack](https://img.shields.io/badge/slack-crossplane-red?logo=slack)](https://slack.crossplane.io) [![Bluesky Follow](https://img.shields.io/badge/bluesky-Follow-blue?logo=bluesky)](https://bsky.app/profile/crossplane.io) [![Twitter Follow](https://img.shields.io/twitter/follow/crossplane_io?logo=X&label=Follow&style=flat)](https://twitter.com/intent/follow?screen_name=crossplane_io&user_id=788180534543339520) [![YouTube Channel Subscribers](https://img.shields.io/youtube/channel/subscribers/UC19FgzMBMqBro361HbE46Fw)](https://www.youtube.com/@Crossplane)
+## CI/CD Integration
 
-Crossplane is a community driven project; we welcome your contribution. To file
-a bug, suggest an improvement, or request a new feature please open an [issue
-against Crossplane] or the relevant provider. Refer to our [contributing guide]
-for more information on how you can help.
+This fork includes a GitHub Action that builds and pushes the validator image on every push to `main`:
 
-* Discuss Crossplane on [Slack].
-* Follow us on [Bluesky], [Twitter], or [LinkedIn].
-* Contact us via [Email].
-* Join our regular community meetings.
-* Provide feedback on our [roadmap and releases board].
+- **Workflow:** `.github/workflows/build-validator.yaml`
+- **Runs on:** Native amd64 (no QEMU emulation issues)
+- **Caches:** Docker layers for fast builds
 
-The Crossplane community meeting takes place every 4 weeks on [Thursday at
-10:00am Pacific Time][community meeting time]. You can find the up to date
-meeting schedule on the [Community Calendar][community calendar].
+## Kept Workflows
 
-Anyone who wants to discuss the direction of the project, design and
-implementation reviews, or raise general questions with the broader community is
-encouraged to join.
+- `ci.yml` - Original Crossplane CI tests
+- `build-validator.yaml` - Our validator image build
 
-* Meeting link: <https://zoom-lfx.platform.linuxfoundation.org/meeting/98901510164?password=c60c41ae-1e1e-42d0-9a74-16de2fbb66f9>
-* [Current agenda and past meeting notes]
-* [Past meeting recordings]
-* [Community Calendar][community calendar]
+## Upstream
 
-### Special Interest Groups (SIG)
-
-Each SIG collaborates in Slack and some groups have regular meetings, you can
-find the meetings in the [Community Calendar][community calendar].
-- [#sig-cli][sig-cli]
-- [#sig-composition-environments][sig-composition-environments-slack]
-- [#sig-composition-functions][sig-composition-functions-slack]
-- [#sig-deletion-ordering][sig-deletion-ordering-slack]
-- [#sig-devex][sig-devex-slack]
-- [#sig-docs][sig-docs-slack]
-- [#sig-e2e-testing][sig-e2e-testing-slack]
-- [#sig-observability][sig-observability-slack]
-- [#sig-observe-only][sig-observe-only-slack]
-- [#sig-provider-families][sig-provider-families-slack]
-- [#sig-secret-stores][sig-secret-stores-slack]
-- [#sig-upjet][sig-upjet-slack]
-
-## Adopters
-
-A list of publicly known users of the Crossplane project can be found in [ADOPTERS.md].  We
-encourage all users of Crossplane to add themselves to this list - we want to see the community's
-growing success!
+This fork is based on [crossplane/crossplane](https://github.com/crossplane/crossplane).
+Changes specific to PhysicsX are in:
+- `cmd/crank/beta/validate/` - Enhanced validation logic
+- `Dockerfile.validator` - Docker image with pre-cached CRDs
+- `.github/workflows/build-validator.yaml` - CI/CD for the validator
 
 ## License
 
-Crossplane is under the Apache 2.0 license.
-
-[![FOSSA Status](https://app.fossa.io/api/projects/git%2Bgithub.com%2Fcrossplane%2Fcrossplane.svg?type=large)](https://app.fossa.io/projects/git%2Bgithub.com%2Fcrossplane%2Fcrossplane?ref=badge_large)
-
-<!-- Named links -->
-
-[Crossplane]: https://crossplane.io
-[release cycle documentation]: https://docs.crossplane.io/knowledge-base/guides/release-cycle
-[install]: https://crossplane.io/docs/latest
-[Slack]: https://slack.crossplane.io
-[Bluesky]: https://bsky.app/profile/crossplane.io
-[Twitter]: https://twitter.com/crossplane_io
-[LinkedIn]: https://www.linkedin.com/company/crossplane/
-[Email]: mailto:crossplane-info@lists.cncf.io
-[issue against Crossplane]: https://github.com/crossplane/crossplane/issues
-[contributing guide]: contributing/README.md
-[community meeting time]: https://www.thetimezoneconverter.com/?t=10:00&tz=PT%20%28Pacific%20Time%29
-[Current agenda and past meeting notes]: https://docs.google.com/document/d/1q_sp2jLQsDEOX7Yug6TPOv7Fwrys6EwcF5Itxjkno7Y/edit?usp=sharing
-[Past meeting recordings]: https://www.youtube.com/playlist?list=PL510POnNVaaYYYDSICFSNWFqNbx1EMr-M
-[roadmap and releases board]: https://github.com/orgs/crossplane/projects/20/views/9?pane=info
-[cncf]: https://www.cncf.io/
-[Get Started Docs]: https://docs.crossplane.io/latest/get-started/get-started-with-composition
-[community calendar]: https://zoom-lfx.platform.linuxfoundation.org/meetings/crossplane?view=month
-[releases]: https://github.com/crossplane/crossplane/releases
-[ADOPTERS.md]: ADOPTERS.md
-[regular community meetings]: https://github.com/crossplane/crossplane/blob/main/README.md#get-involved
-[Crossplane Roadmap]: https://github.com/orgs/crossplane/projects/20/views/9?pane=info
-[sig-cli]: https://crossplane.slack.com/archives/C08V9PMLRQA
-[sig-composition-environments-slack]: https://crossplane.slack.com/archives/C05BP6QFLUW
-[sig-composition-functions-slack]: https://crossplane.slack.com/archives/C031Y29CSAE
-[sig-deletion-ordering-slack]: https://crossplane.slack.com/archives/C05BP8W5ALW
-[sig-devex-slack]: https://crossplane.slack.com/archives/C05U1LLM3B2
-[sig-docs-slack]: https://crossplane.slack.com/archives/C02CAQ52DPU
-[sig-e2e-testing-slack]: https://crossplane.slack.com/archives/C05C8CCTVNV
-[sig-observability-slack]: https://crossplane.slack.com/archives/C061GNH3LA0
-[sig-observe-only-slack]: https://crossplane.slack.com/archives/C04D5988QEA
-[sig-provider-families-slack]: https://crossplane.slack.com/archives/C056YAQRV16
-[sig-secret-stores-slack]: https://crossplane.slack.com/archives/C05BY7DKFV2
-[sig-upjet-slack]: https://crossplane.slack.com/archives/C05T19TB729
+Apache 2.0 (same as upstream Crossplane)
