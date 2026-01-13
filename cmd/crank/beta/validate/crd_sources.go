@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/rand"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -33,6 +34,84 @@ import (
 
 	"github.com/crossplane/crossplane-runtime/v2/pkg/errors"
 )
+
+const (
+	// Default retry settings for HTTP requests
+	defaultMaxRetries     = 3
+	defaultRetryBaseDelay = 1 * time.Second
+	defaultRetryMaxDelay  = 10 * time.Second
+)
+
+// httpDoWithRetry performs an HTTP request with retry logic for transient errors.
+// It retries on 5xx errors, connection errors, and timeouts with exponential backoff.
+func httpDoWithRetry(ctx context.Context, client *http.Client, req *http.Request) (*http.Response, error) {
+	var lastErr error
+	
+	for attempt := 0; attempt < defaultMaxRetries; attempt++ {
+		// Clone the request for retry (body may have been consumed)
+		reqCopy := req.Clone(ctx)
+		
+		resp, err := client.Do(reqCopy)
+		if err != nil {
+			lastErr = err
+			// Retry on connection errors
+			if shouldRetry(err, nil) {
+				waitForRetry(ctx, attempt)
+				continue
+			}
+			return nil, err
+		}
+		
+		// Check if we should retry based on status code
+		if shouldRetryStatusCode(resp.StatusCode) {
+			lastErr = fmt.Errorf("HTTP %d", resp.StatusCode)
+			resp.Body.Close()
+			waitForRetry(ctx, attempt)
+			continue
+		}
+		
+		return resp, nil
+	}
+	
+	return nil, fmt.Errorf("failed after %d retries: %w", defaultMaxRetries, lastErr)
+}
+
+// shouldRetry returns true if the error is a transient error worth retrying.
+func shouldRetry(err error, resp *http.Response) bool {
+	if err != nil {
+		// Retry on timeout, connection reset, etc.
+		errStr := err.Error()
+		return strings.Contains(errStr, "timeout") ||
+			strings.Contains(errStr, "connection reset") ||
+			strings.Contains(errStr, "connection refused") ||
+			strings.Contains(errStr, "no such host") ||
+			strings.Contains(errStr, "EOF")
+	}
+	return false
+}
+
+// shouldRetryStatusCode returns true if the HTTP status code indicates a transient error.
+func shouldRetryStatusCode(statusCode int) bool {
+	// Retry on 5xx (server errors), 429 (rate limit), and 408 (timeout)
+	return statusCode >= 500 || statusCode == 429 || statusCode == 408
+}
+
+// waitForRetry waits with exponential backoff before the next retry attempt.
+func waitForRetry(ctx context.Context, attempt int) {
+	// Exponential backoff with jitter: base * 2^attempt + random jitter
+	delay := defaultRetryBaseDelay * time.Duration(1<<attempt)
+	if delay > defaultRetryMaxDelay {
+		delay = defaultRetryMaxDelay
+	}
+	// Add jitter (0-25% of delay)
+	jitter := time.Duration(rand.Int63n(int64(delay / 4)))
+	delay += jitter
+	
+	select {
+	case <-time.After(delay):
+	case <-ctx.Done():
+	}
+}
 
 // CRDSourceType defines the type of CRD source.
 type CRDSourceType string
@@ -292,9 +371,10 @@ func (f *CRDSourceFetcher) prefetchAllFromGitHub(ctx context.Context, source CRD
 	}
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
-	resp, err := f.httpClient.Do(req)
+	// Use retry logic for GitHub API calls to handle rate limits and transient errors
+	resp, err := httpDoWithRetry(ctx, f.httpClient, req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("GitHub API request failed for %s: %w", apiURL, err)
 	}
 	defer resp.Body.Close()
 
@@ -816,9 +896,10 @@ func (f *CRDSourceFetcher) fetchCRDFromURL(ctx context.Context, url string) (*ex
 		return nil, err
 	}
 
-	resp, err := f.httpClient.Do(req)
+	// Use retry logic to handle transient errors (5xx, timeouts, etc.)
+	resp, err := httpDoWithRetry(ctx, f.httpClient, req)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to fetch CRD from %s: %w", url, err)
 	}
 	defer resp.Body.Close()
 
