@@ -56,27 +56,14 @@ RUN echo "=== Pre-caching CRDs from all sources ===" && \
     crank beta validate /tmp/dummy /tmp/dummy \
       --prefetch-all-crds \
       --parallel-fetch 20 \
+      # Core Crossplane CRDs
       --crd-sources "github:crossplane/crossplane:main:cluster/crds" \
+      # Monolithic providers (contain ALL CRDs for AWS/Azure)
       --crd-sources "github:crossplane-contrib/provider-upjet-aws:main:package/crds" \
       --crd-sources "github:crossplane-contrib/provider-upjet-azure:main:package/crds" \
+      # Other providers
       --crd-sources "github:crossplane-contrib/provider-helm:main:package/crds" \
       --crd-sources "github:crossplane-contrib/provider-kubernetes:main:package/crds" \
-      --crd-sources "github:upbound/provider-aws-ec2:main:package/crds" \
-      --crd-sources "github:upbound/provider-aws-eks:main:package/crds" \
-      --crd-sources "github:upbound/provider-aws-iam:main:package/crds" \
-      --crd-sources "github:upbound/provider-aws-s3:main:package/crds" \
-      --crd-sources "github:upbound/provider-aws-rds:main:package/crds" \
-      --crd-sources "github:upbound/provider-aws-kms:main:package/crds" \
-      --crd-sources "github:upbound/provider-aws-lambda:main:package/crds" \
-      --crd-sources "github:upbound/provider-aws-sns:main:package/crds" \
-      --crd-sources "github:upbound/provider-aws-sqs:main:package/crds" \
-      --crd-sources "github:upbound/provider-aws-route53:main:package/crds" \
-      --crd-sources "github:upbound/provider-aws-acm:main:package/crds" \
-      --crd-sources "github:upbound/provider-aws-elasticache:main:package/crds" \
-      --crd-sources "github:upbound/provider-aws-secretsmanager:main:package/crds" \
-      --crd-sources "github:upbound/provider-azure-network:main:package/crds" \
-      --crd-sources "github:upbound/provider-azure-containerservice:main:package/crds" \
-      --crd-sources "github:upbound/provider-azure-storage:main:package/crds" \
       --crd-sources "github:upbound/provider-vault:main:package/crds" \
       --crd-sources "github:deinstapel/nats-jwt-operator:main:config/crd/bases" \
       --crd-sources "github:crossplane-contrib/function-patch-and-transform:main:package/input" \
