@@ -193,6 +193,62 @@ func ParseCRDSource(source string) (CRDSource, error) {
 	}
 }
 
+// KindToDefaultAPIVersion maps Kind to its default apiVersion for resources missing apiVersion.
+// This handles embedded manifests in kubernetes.crossplane.io/v1alpha2 Object resources
+// that may omit apiVersion (the Object controller infers it, but the validator needs it explicit).
+var KindToDefaultAPIVersion = map[string]string{
+	// Core Kubernetes types (v1)
+	"Namespace":             "v1",
+	"Secret":                "v1",
+	"ConfigMap":             "v1",
+	"Service":               "v1",
+	"ServiceAccount":        "v1",
+	"PersistentVolumeClaim": "v1",
+	"Pod":                   "v1",
+	"Endpoints":             "v1",
+	// RBAC types
+	"Role":               "rbac.authorization.k8s.io/v1",
+	"RoleBinding":        "rbac.authorization.k8s.io/v1",
+	"ClusterRole":        "rbac.authorization.k8s.io/v1",
+	"ClusterRoleBinding": "rbac.authorization.k8s.io/v1",
+	// Apps types
+	"Deployment":  "apps/v1",
+	"StatefulSet": "apps/v1",
+	"DaemonSet":   "apps/v1",
+	"ReplicaSet":  "apps/v1",
+	// Batch types
+	"Job":     "batch/v1",
+	"CronJob": "batch/v1",
+	// Networking types
+	"Ingress":       "networking.k8s.io/v1",
+	"NetworkPolicy": "networking.k8s.io/v1",
+	"IngressClass":  "networking.k8s.io/v1",
+	// Storage types
+	"StorageClass": "storage.k8s.io/v1",
+	// Policy types
+	"PodDisruptionBudget": "policy/v1",
+	// Scheduling types
+	"PriorityClass": "scheduling.k8s.io/v1",
+	// Autoscaling types
+	"HorizontalPodAutoscaler": "autoscaling/v2",
+	// Istio types
+	"VirtualService":       "networking.istio.io/v1beta1",
+	"DestinationRule":      "networking.istio.io/v1beta1",
+	"Gateway":              "networking.istio.io/v1beta1",
+	"ServiceEntry":         "networking.istio.io/v1beta1",
+	"AuthorizationPolicy":  "security.istio.io/v1beta1",
+	"PeerAuthentication":   "security.istio.io/v1beta1",
+	"RequestAuthentication":"security.istio.io/v1beta1",
+	// Cert-manager types
+	"Certificate":   "cert-manager.io/v1",
+	"ClusterIssuer": "cert-manager.io/v1",
+	"Issuer":        "cert-manager.io/v1",
+	// External Secrets types
+	"SecretStore":        "external-secrets.io/v1beta1",
+	"ClusterSecretStore": "external-secrets.io/v1beta1",
+	"ExternalSecret":     "external-secrets.io/v1beta1",
+}
+
 // CoreK8sTypes maps GVK strings to their group/version/kind for fetching from kubernetes-json-schema.
 // These are Kubernetes built-in types that don't have CRDs but can be validated using JSON schemas.
 var CoreK8sTypes = map[string]struct {

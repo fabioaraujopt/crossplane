@@ -693,10 +693,22 @@ func extractNestedGVKs(obj map[string]interface{}, gvks map[string]bool) {
 	apiVersion, _ := manifest["apiVersion"].(string)
 	kind, _ := manifest["kind"].(string)
 
+	// Infer apiVersion from Kind if missing (common in embedded manifests)
+	if apiVersion == "" && kind != "" {
+		apiVersion = InferAPIVersionFromKind(kind)
+	}
+
 	if apiVersion != "" && kind != "" {
 		gvk := fmt.Sprintf("%s, Kind=%s", apiVersion, kind)
 		gvks[gvk] = true
 	}
+}
+
+// InferAPIVersionFromKind returns the default apiVersion for well-known Kubernetes types.
+// This handles embedded manifests in kubernetes.crossplane.io/v1alpha2 Object resources
+// that may omit apiVersion (the Object controller infers it).
+func InferAPIVersionFromKind(kind string) string {
+	return KindToDefaultAPIVersion[kind]
 }
 
 // extractFunctionInputGVKs extracts GVKs from function pipeline inputs.
