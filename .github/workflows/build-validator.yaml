@@ -55,8 +55,9 @@ jobs:
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.git-info.outputs.sha_short }}
             ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPOSITORY }}:${{ steps.git-info.outputs.branch }}
           # Pass GitHub token as build secret for private repo access (px-operator)
+          # Uses VALIDATOR_GH_TOKEN - a PAT with access to PhysicsXLtd private repos
           secrets: |
-            github_token=${{ secrets.GH_PLATFORM_SERVICES_TOKEN }}
+            github_token=${{ secrets.VALIDATOR_GH_TOKEN }}
           # Disable caching to avoid 502 errors during push
           no-cache: true
           provenance: false  # Disable provenance to speed up push
