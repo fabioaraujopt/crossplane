@@ -68,7 +68,7 @@ RUN echo "=== Pre-caching CRDs from all sources ===" && \
       --crd-sources "github:crossplane-contrib/function-tag-manager:main:package/input" \
       --crd-sources "github:istio/istio:master:manifests/charts/base/files" \
       --crd-sources "github:aws/karpenter-provider-aws:main:pkg/apis/crds" \
-      --crd-sources "github:Azure/karpenter-provider-azure:main:charts/karpenter/crds" \
+      --crd-sources "github:Azure/karpenter-provider-azure:main:pkg/apis/crds" \
       --crd-sources "github:kubernetes-sigs/karpenter:main:pkg/apis/crds" \
       --crd-sources "github:cert-manager/cert-manager:master:deploy/crds" \
       --crd-sources "github:vmware-tanzu/velero:main:config/crd/v1/bases" \
