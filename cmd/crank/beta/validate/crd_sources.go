@@ -91,6 +91,20 @@ func shouldRetry(err error, resp *http.Response) bool {
 	return false
 }
 
+// explainGitHubHTTPError returns a user-friendly explanation for GitHub API HTTP errors.
+func explainGitHubHTTPError(statusCode int, url string) error {
+	switch statusCode {
+	case 401:
+		return fmt.Errorf("GitHub API returned HTTP 401 (Unauthorized) for %s - invalid or expired token. Check your --github-token or GITHUB_TOKEN env var", url)
+	case 403:
+		return fmt.Errorf("GitHub API returned HTTP 403 (Forbidden) for %s - token lacks permissions or SSO authorization. For org repos, authorize the token at: https://github.com/settings/tokens (Configure SSO)", url)
+	case 404:
+		return fmt.Errorf("GitHub API returned HTTP 404 (Not Found) for %s - repo/path doesn't exist or token can't access private repo", url)
+	default:
+		return fmt.Errorf("GitHub API returned HTTP %d for %s", statusCode, url)
+	}
+}
+
 // shouldRetryStatusCode returns true if the HTTP status code indicates a transient error.
 func shouldRetryStatusCode(statusCode int) bool {
 	// Retry on 5xx (server errors), 429 (rate limit), and 408 (timeout)
@@ -451,7 +465,7 @@ func (f *CRDSourceFetcher) prefetchAllFromGitHub(ctx context.Context, source CRD
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitHub API returned HTTP %d for %s", resp.StatusCode, refURL)
+		return nil, explainGitHubHTTPError(resp.StatusCode, refURL)
 	}
 
 	var refData struct {
@@ -480,7 +494,7 @@ func (f *CRDSourceFetcher) prefetchAllFromGitHub(ctx context.Context, source CRD
 	defer resp2.Body.Close()
 
 	if resp2.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitHub API returned HTTP %d for tree", resp2.StatusCode)
+		return nil, explainGitHubHTTPError(resp2.StatusCode, treeURL)
 	}
 
 	var treeData struct {
@@ -867,6 +881,7 @@ func (f *CRDSourceFetcher) fetchFromGitHub(ctx context.Context, source CRDSource
 	// This is more efficient than downloading the entire repo
 	// Alternative: download archive from https://github.com/{repo}/archive/refs/heads/{branch}.tar.gz
 	var crds []*extv1.CustomResourceDefinition
+	var firstAuthError error // Track first 401/403 error to report if no CRDs found
 
 	for gvk := range requiredGVKs {
 		if foundGVKs[gvk] {
@@ -902,7 +917,17 @@ func (f *CRDSourceFetcher) fetchFromGitHub(ctx context.Context, source CRDSource
 				source.Location, source.Branch, source.Path, name)
 
 			crd, err := f.fetchCRDFromURL(ctx, rawURL)
-			if err != nil || crd == nil {
+			if err != nil {
+				// Track auth errors (401, 403) - these indicate token issues
+				errStr := err.Error()
+				if strings.Contains(errStr, "401") || strings.Contains(errStr, "403") {
+					if firstAuthError == nil {
+						firstAuthError = err
+					}
+				}
+				continue
+			}
+			if crd == nil {
 				continue
 			}
 			// Verify this is the right CRD
@@ -914,6 +939,12 @@ func (f *CRDSourceFetcher) fetchFromGitHub(ctx context.Context, source CRDSource
 				break
 			}
 		}
+	}
+
+	// If no CRDs found and we had auth errors, report the auth issue
+	// This ensures users know WHY the private repo fetch failed
+	if len(crds) == 0 && firstAuthError != nil {
+		return nil, firstAuthError
 	}
 
 	return crds, nil
@@ -1131,7 +1162,7 @@ func (f *CRDSourceFetcher) fetchCRDsFromGitHubAPI(ctx context.Context, apiURL st
 	defer resp.Body.Close()
 	
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitHub API returned HTTP %d", resp.StatusCode)
+		return nil, explainGitHubHTTPError(resp.StatusCode, apiURL)
 	}
 	
 	// GitHub API returns JSON with content field (base64 encoded)
