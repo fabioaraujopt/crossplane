@@ -72,7 +72,7 @@ RUN echo "=== Pre-caching CRDs from all sources ===" && \
       --crd-sources "github:kubernetes-sigs/karpenter:main:pkg/apis/crds" \
       --crd-sources "github:cert-manager/cert-manager:master:deploy/crds" \
       --crd-sources "github:vmware-tanzu/velero:main:config/crd/v1/bases" \
-      --crd-sources "github:nats-io/nack:main:deploy" \
+      --crd-sources "github:nats-io/k8s:main:helm/charts/nack/crds" \
       --crd-sources "github:open-telemetry/opentelemetry-operator:main:config/crd/bases" \
       --crd-sources "github:external-secrets/external-secrets:main:config/crds/bases" \
       --crd-sources "github:alexandrevilain/temporal-operator:main:charts/temporal-operator/crds" \
