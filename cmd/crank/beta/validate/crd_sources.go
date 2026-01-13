@@ -325,12 +325,50 @@ func (f *CRDSourceFetcher) SetGitHubToken(token string) {
 	f.githubToken = token
 }
 
-// addGitHubHeaders adds required headers for GitHub API requests, including auth if token is set.
-func (f *CRDSourceFetcher) addGitHubHeaders(req *http.Request) {
+// addGitHubHeaders adds required headers for GitHub API requests.
+// withAuth controls whether to include the auth token (use false for public repos first).
+func (f *CRDSourceFetcher) addGitHubHeaders(req *http.Request, withAuth bool) {
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	if f.githubToken != "" {
+	if withAuth && f.githubToken != "" {
 		req.Header.Set("Authorization", "token "+f.githubToken)
 	}
+}
+
+// doGitHubRequest performs a GitHub API request.
+// For api.github.com: ALWAYS use auth (to avoid rate limiting - 60 req/hr without, 5000 with)
+// For raw.githubusercontent.com: try without auth first, then with auth on 404 (private repo)
+func (f *CRDSourceFetcher) doGitHubRequest(ctx context.Context, url string) (*http.Response, error) {
+	isAPIRequest := strings.Contains(url, "api.github.com")
+	
+	// For API requests, always use auth to avoid rate limiting
+	// For raw content, try without auth first (works for public repos without rate limits)
+	useAuth := isAPIRequest && f.githubToken != ""
+	
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	f.addGitHubHeaders(req, useAuth)
+
+	resp, err := httpDoWithRetry(ctx, f.httpClient, req)
+	if err != nil {
+		return nil, err
+	}
+
+	// If 404 and we have a token and didn't use it yet, retry WITH auth (might be private repo)
+	if resp.StatusCode == http.StatusNotFound && f.githubToken != "" && !useAuth {
+		resp.Body.Close()
+
+		req2, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return nil, err
+		}
+		f.addGitHubHeaders(req2, true) // With auth
+
+		return httpDoWithRetry(ctx, f.httpClient, req2)
+	}
+
+	return resp, nil
 }
 
 // SetParallelism sets the number of parallel fetch operations.
@@ -452,13 +490,7 @@ func (f *CRDSourceFetcher) prefetchAllFromGitHub(ctx context.Context, source CRD
 	refURL := fmt.Sprintf("https://api.github.com/repos/%s/git/ref/heads/%s",
 		source.Location, source.Branch)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, refURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	f.addGitHubHeaders(req)
-
-	resp, err := httpDoWithRetry(ctx, f.httpClient, req)
+	resp, err := f.doGitHubRequest(ctx, refURL)
 	if err != nil {
 		return nil, fmt.Errorf("GitHub API request failed for %s: %w", refURL, err)
 	}
@@ -481,13 +513,7 @@ func (f *CRDSourceFetcher) prefetchAllFromGitHub(ctx context.Context, source CRD
 	treeURL := fmt.Sprintf("https://api.github.com/repos/%s/git/trees/%s?recursive=1",
 		source.Location, refData.Object.SHA)
 
-	req2, err := http.NewRequestWithContext(ctx, http.MethodGet, treeURL, nil)
-	if err != nil {
-		return nil, err
-	}
-	f.addGitHubHeaders(req2)
-
-	resp2, err := httpDoWithRetry(ctx, f.httpClient, req2)
+	resp2, err := f.doGitHubRequest(ctx, treeURL)
 	if err != nil {
 		return nil, fmt.Errorf("GitHub API request failed for tree: %w", err)
 	}
@@ -1066,18 +1092,8 @@ func (f *CRDSourceFetcher) fetchCRDFromURL(ctx context.Context, url string) (*ex
 }
 
 // fetchCRDsFromURL fetches CRDs from a URL, handling multi-document YAML files.
-// For private GitHub repos, it converts raw.githubusercontent.com URLs to GitHub API calls.
+// For private GitHub repos, it tries raw URL first, then falls back to API with auth on 404.
 func (f *CRDSourceFetcher) fetchCRDsFromURL(ctx context.Context, url string) ([]*extv1.CustomResourceDefinition, error) {
-	// For private repos, raw.githubusercontent.com doesn't work with tokens
-	// Convert to GitHub API: https://api.github.com/repos/{owner}/{repo}/contents/{path}?ref={branch}
-	if strings.Contains(url, "raw.githubusercontent.com") && f.githubToken != "" {
-		apiURL, err := convertRawURLToAPI(url)
-		if err == nil {
-			return f.fetchCRDsFromGitHubAPI(ctx, apiURL)
-		}
-		// If conversion fails, fall through to regular fetch
-	}
-
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -1089,6 +1105,15 @@ func (f *CRDSourceFetcher) fetchCRDsFromURL(ctx context.Context, url string) ([]
 		return nil, fmt.Errorf("failed to fetch CRD from %s: %w", url, err)
 	}
 	defer resp.Body.Close()
+
+	// If 404 and we have a token, try GitHub API (might be private repo)
+	if resp.StatusCode == http.StatusNotFound && f.githubToken != "" && strings.Contains(url, "raw.githubusercontent.com") {
+		resp.Body.Close()
+		apiURL, err := convertRawURLToAPI(url)
+		if err == nil {
+			return f.fetchCRDsFromGitHubAPI(ctx, apiURL)
+		}
+	}
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("HTTP %d", resp.StatusCode)
@@ -1146,14 +1171,15 @@ func convertRawURLToAPI(rawURL string) (string, error) {
 }
 
 // fetchCRDsFromGitHubAPI fetches CRDs using the GitHub API (works with private repos).
+// This is only called as a fallback for private repos, so we always use auth.
 func (f *CRDSourceFetcher) fetchCRDsFromGitHubAPI(ctx context.Context, apiURL string) ([]*extv1.CustomResourceDefinition, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	
-	// Add GitHub auth headers
-	f.addGitHubHeaders(req)
+	// Always use auth - this is only called for private repos
+	f.addGitHubHeaders(req, true)
 	
 	resp, err := httpDoWithRetry(ctx, f.httpClient, req)
 	if err != nil {
