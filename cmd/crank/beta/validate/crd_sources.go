@@ -354,10 +354,12 @@ func (f *CRDSourceFetcher) addGitHubHeaders(req *http.Request, withAuth bool) {
 }
 
 // doGitHubRequest performs a GitHub API request.
-// - isPrivate=true: Always use auth (for private repos)
-// - isPrivate=false: Never use auth (for public repos - avoids SSO issues)
+// For API requests (api.github.com): ALWAYS use auth to get 5000 req/hr (vs 60 without)
+// For raw content (raw.githubusercontent.com): Only use auth for private repos
 func (f *CRDSourceFetcher) doGitHubRequest(ctx context.Context, url string, isPrivate bool) (*http.Response, error) {
-	useAuth := isPrivate && f.githubToken != ""
+	isAPIRequest := strings.Contains(url, "api.github.com")
+	// Always use auth for API requests (rate limits), only use auth for private raw content
+	useAuth := f.githubToken != "" && (isAPIRequest || isPrivate)
 	
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
