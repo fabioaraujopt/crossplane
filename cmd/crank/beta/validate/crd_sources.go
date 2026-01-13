@@ -890,22 +890,37 @@ func (f *CRDSourceFetcher) fetchFromGitHub(ctx context.Context, source CRDSource
 			fmt.Sprintf("%s_%sies.yaml", group, kindLower[:len(kindLower)-1]), // e.g., policies -> policy
 		}
 
+		var lastErr error
+		var triedURLs []string
+		found := false
 		for _, name := range possibleNames {
 			rawURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s/%s", 
 				source.Location, source.Branch, source.Path, name)
+			triedURLs = append(triedURLs, name)
 
 			crd, err := f.fetchCRDFromURL(ctx, rawURL)
-			if err == nil && crd != nil {
-				// Verify this is the right CRD
-				if crd.Spec.Group == group && crd.Spec.Names.Kind == kind {
-					crds = append(crds, crd)
-					foundGVKs[gvk] = true
-					
-					// Cache the CRD
-					f.saveCRDToCache(cachePath, name, crd)
-					break
-				}
+			if err != nil {
+				lastErr = err
+				continue
 			}
+			if crd == nil {
+				continue
+			}
+			// Verify this is the right CRD
+			if crd.Spec.Group == group && crd.Spec.Names.Kind == kind {
+				crds = append(crds, crd)
+				foundGVKs[gvk] = true
+				found = true
+				
+				// Cache the CRD
+				f.saveCRDToCache(cachePath, name, crd)
+				break
+			}
+		}
+		// Log if we couldn't find the CRD after trying all patterns
+		if !found && lastErr != nil {
+			fmt.Fprintf(f.writer, "    ⚠️ Could not fetch %s from %s (tried: %v): %v\n", 
+				gvk, source.Location, triedURLs, lastErr)
 		}
 	}
 
@@ -954,13 +969,24 @@ func (f *CRDSourceFetcher) fetchFromCatalog(ctx context.Context, source CRDSourc
 		}
 
 		// Try each URL until one works
+		var lastErr error
+		found := false
 		for _, url := range urls {
 			crd, err := f.fetchCRDFromURL(ctx, url)
-			if err == nil && crd != nil {
+			if err != nil {
+				lastErr = err
+				continue
+			}
+			if crd != nil {
 				crds = append(crds, crd)
 				foundGVKs[gvk] = true
+				found = true
 				break
 			}
+		}
+		// Log if we couldn't find the CRD from catalog
+		if !found && lastErr != nil {
+			fmt.Fprintf(f.writer, "    ⚠️ Could not fetch %s from catalog: %v\n", gvk, lastErr)
 		}
 	}
 
