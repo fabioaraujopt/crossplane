@@ -48,14 +48,17 @@ RUN mkdir -p /home/nonroot/.crossplane/cache/crd-sources
 
 # Pre-cache ALL CRDs from frequently used sources to speed up CI/CD validation
 # NOTE: This requires building on native amd64 (GitHub Actions) - QEMU crashes on ARM Macs
-# Uses --prefetch-all-crds to download everything in parallel (20 concurrent connections)
-# Note: Some upbound/provider-aws-* repos may 404 (family providers have different structure)
-#       but that's OK - we still get the main provider CRDs from crossplane-contrib
-RUN echo "=== Pre-caching CRDs from all sources ===" && \
+# Uses --prefetch-all-crds to download everything in parallel
+# The github_token secret is passed from the build workflow for private repo access (px-operator)
+RUN --mount=type=secret,id=github_token \
+    echo "=== Pre-caching CRDs from all sources ===" && \
     mkdir -p /tmp/dummy && touch /tmp/dummy/empty.yaml && \
+    GITHUB_TOKEN=$(cat /run/secrets/github_token 2>/dev/null || echo "") && \
+    export GITHUB_TOKEN && \
     crank beta validate /tmp/dummy /tmp/dummy \
       --prefetch-all-crds \
       --parallel-fetch 5 \
+      --crd-sources "github:PhysicsXLtd/px-operator:main:config/crd/bases" \
       --crd-sources "github:crossplane/crossplane:main:cluster/crds" \
       --crd-sources "github:crossplane-contrib/provider-upjet-aws:main:package/crds" \
       --crd-sources "github:crossplane-contrib/provider-upjet-azure:main:package/crds" \
@@ -73,7 +76,7 @@ RUN echo "=== Pre-caching CRDs from all sources ===" && \
       --crd-sources "github:cert-manager/cert-manager:master:deploy/crds" \
       --crd-sources "github:vmware-tanzu/velero:main:config/crd/v1/bases" \
       --crd-sources "github:nats-io/k8s:main:helm/charts/nack/crds" \
-     --crd-sources "github:nats-io/nack:main:deploy" \
+      --crd-sources "github:nats-io/nack:main:deploy" \
       --crd-sources "github:open-telemetry/opentelemetry-operator:main:config/crd/bases" \
       --crd-sources "github:external-secrets/external-secrets:main:config/crds/bases" \
       --crd-sources "github:alexandrevilain/temporal-operator:main:charts/temporal-operator/crds" \
