@@ -77,7 +77,7 @@ RUN echo "=== Pre-caching CRDs from all sources ===" && \
       --crd-sources "github:external-secrets/external-secrets:main:config/crds/bases" \
       --crd-sources "github:temporalio/temporal-operator:main:config/crd/bases" \
       --crd-sources "catalog:https://raw.githubusercontent.com/datreeio/CRDs-catalog/main" \
-      --crd-sources "k8s:v1.32.0" \
+      --crd-sources "k8s:v1.34.0" \
       --skip-success-results 2>&1 || true && \
     echo "" && \
     echo "=== CRD Cache Summary ===" && \
