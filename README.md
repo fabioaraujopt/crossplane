@@ -65,10 +65,11 @@ This fork includes a GitHub Action that builds and pushes the validator image on
 - **Runs on:** Native amd64 (no QEMU emulation issues)
 - **Caches:** Docker layers for fast builds
 
-## Kept Workflows
+## Workflows
 
-- `ci.yml` - Original Crossplane CI tests
-- `build-validator.yaml` - Our validator image build
+- `build-validator.yaml` - Builds and pushes the validator Docker image to ECR
+
+Note: We removed the upstream Crossplane CI workflow (protobuf, trivy, e2e tests, etc.) as it's not needed for this fork.
 
 ## Upstream
 
