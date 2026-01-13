@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	ext "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
 	extv1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
@@ -109,10 +110,17 @@ func SchemaValidationWithPatches(ctx context.Context, resources []*unstructured.
 	}
 
 	failure, missingSchemas := 0, 0
-	missingGVKs := make(map[string]int) // Track which GVKs are missing and how many times
+	missingGVKs := make(map[string]int)           // Track which GVKs are missing and how many times
+	missingGVKLocations := make(map[string][]string) // Track file locations for each missing GVK
 
 	for _, r := range resources {
 		gvk := r.GetObjectKind().GroupVersionKind()
+		
+		// Skip empty documents (can happen from comment blocks before ---)
+		if gvk.Version == "" && gvk.Kind == "" {
+			continue
+		}
+		
 		sv, ok := schemaValidators[gvk]
 		s := structurals[gvk] // if we have a schema validator, we should also have a structural
 
@@ -120,6 +128,17 @@ func SchemaValidationWithPatches(ctx context.Context, resources []*unstructured.
 			missingSchemas++
 			gvkStr := r.GroupVersionKind().String()
 			missingGVKs[gvkStr]++
+			
+			// Track location for debugging malformed manifests
+			sourceFile := load.GetSourceFile(r)
+			sourceLine := load.GetSourceLine(r)
+			if sourceFile != "" {
+				loc := fmt.Sprintf("%s:%d", sourceFile, sourceLine)
+				// Only keep first 3 locations per GVK to avoid noise
+				if len(missingGVKLocations[gvkStr]) < 3 {
+					missingGVKLocations[gvkStr] = append(missingGVKLocations[gvkStr], loc)
+				}
+			}
 			continue
 		}
 
@@ -225,8 +244,22 @@ func SchemaValidationWithPatches(ctx context.Context, resources []*unstructured.
 			return errors.Wrap(err, errWriteOutput)
 		}
 		for gvk, count := range missingGVKs {
-			if _, err := fmt.Fprintf(w, "    ❌ %s (%d resources)\n", gvk, count); err != nil {
-				return errors.Wrap(err, errWriteOutput)
+			// Special handling for empty/malformed GVKs - show locations
+			if gvk == "/, Kind=" || gvk == ", Kind=" || strings.HasPrefix(gvk, "/, Kind=") {
+				if _, err := fmt.Fprintf(w, "    ❌ %s (%d resources) - MALFORMED MANIFEST (missing apiVersion/kind)\n", gvk, count); err != nil {
+					return errors.Wrap(err, errWriteOutput)
+				}
+				if locs, ok := missingGVKLocations[gvk]; ok {
+					for _, loc := range locs {
+						if _, err := fmt.Fprintf(w, "        └─ %s\n", loc); err != nil {
+							return errors.Wrap(err, errWriteOutput)
+						}
+					}
+				}
+			} else {
+				if _, err := fmt.Fprintf(w, "    ❌ %s (%d resources)\n", gvk, count); err != nil {
+					return errors.Wrap(err, errWriteOutput)
+				}
 			}
 		}
 	}

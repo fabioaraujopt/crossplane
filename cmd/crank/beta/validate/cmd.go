@@ -327,7 +327,7 @@ func (c *Cmd) Run(k *kong.Context, _ logging.Logger) error {
 			}
 		}
 
-		// Report any errors from prefetch (but don't fail - we still got some CRDs)
+		// Report any errors from prefetch
 		if len(fetchErrs) > 0 {
 			if _, err := fmt.Fprintf(k.Stdout, "\n[!] %d sources had errors during fetch:\n", len(fetchErrs)); err != nil {
 				return errors.Wrapf(err, "cannot write output")
@@ -336,6 +336,10 @@ func (c *Cmd) Run(k *kong.Context, _ logging.Logger) error {
 				if _, err := fmt.Fprintf(k.Stdout, "    ⚠️  %v\n", fetchErr); err != nil {
 					return errors.Wrapf(err, "cannot write output")
 				}
+			}
+			// If fail-on-missing-crd is enabled, also fail on fetch errors
+			if c.FailOnMissingCRD {
+				return fmt.Errorf("failed to fetch CRDs from %d sources (use --fail-on-missing-crd=false to continue anyway)", len(fetchErrs))
 			}
 		}
 
@@ -617,8 +621,17 @@ func discoverRequiredGVKs(extensions []*unstructured.Unstructured) map[string]bo
 	gvks := make(map[string]bool)
 
 	for _, obj := range extensions {
+		// Skip empty documents (can happen from comment blocks before ---)
+		if obj.GetAPIVersion() == "" && obj.GetKind() == "" {
+			continue
+		}
+
 		// Add the extension object's own GVK (compositions, XRDs need validation too)
 		objGVK := fmt.Sprintf("%s, Kind=%s", obj.GetAPIVersion(), obj.GetKind())
+		// Skip malformed GVKs
+		if objGVK == ", Kind=" || objGVK == "/, Kind=" {
+			continue
+		}
 		gvks[objGVK] = true
 
 		// Also add function input GVKs from pipeline steps
