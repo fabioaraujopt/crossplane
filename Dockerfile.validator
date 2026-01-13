@@ -41,21 +41,19 @@ COPY --from=builder /bin/crank /usr/local/bin/crank
 RUN addgroup -g 65532 -S nonroot && \
     adduser -u 65532 -S nonroot -G nonroot
 
-USER nonroot
-
-# Create cache directory with proper permissions
-RUN mkdir -p /home/nonroot/.crossplane/cache/crd-sources
+# Create cache directory with proper permissions (as root first)
+RUN mkdir -p /home/nonroot/.crossplane/cache/crd-sources && \
+    chown -R nonroot:nonroot /home/nonroot/.crossplane
 
 # Pre-cache ALL CRDs from frequently used sources to speed up CI/CD validation
-# NOTE: This requires building on native amd64 (GitHub Actions) - QEMU crashes on ARM Macs
-# Uses --prefetch-all-crds to download everything in parallel
+# NOTE: Running as root to access Docker build secrets, then fix permissions
 # The github_token secret is passed from the build workflow for private repo access (px-operator)
 RUN --mount=type=secret,id=github_token \
     echo "=== Pre-caching CRDs from all sources ===" && \
     mkdir -p /tmp/dummy && touch /tmp/dummy/empty.yaml && \
     GITHUB_TOKEN=$(cat /run/secrets/github_token 2>/dev/null || echo "") && \
     echo "GitHub token length: ${#GITHUB_TOKEN}" && \
-    crank beta validate /tmp/dummy /tmp/dummy \
+    HOME=/home/nonroot crank beta validate /tmp/dummy /tmp/dummy \
       --prefetch-all-crds \
       --parallel-fetch 5 \
       --github-token "$GITHUB_TOKEN" \
@@ -88,7 +86,11 @@ RUN --mount=type=secret,id=github_token \
     echo "=== CRD Cache Summary ===" && \
     find /home/nonroot/.crossplane/cache/crd-sources/ -name "*.yaml" | wc -l | xargs -I{} echo "Total CRDs cached: {}" && \
     ls -la /home/nonroot/.crossplane/cache/crd-sources/ && \
+    chown -R nonroot:nonroot /home/nonroot/.crossplane && \
     rm -rf /tmp/dummy
+
+# Switch to non-root user for runtime
+USER nonroot
 
 # Set working directory for validation
 WORKDIR /workspace
