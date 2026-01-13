@@ -361,56 +361,103 @@ func (f *CRDSourceFetcher) prefetchAllFromGitHub(ctx context.Context, source CRD
 		return f.loadAllFromCache(cachePath)
 	}
 
-	// Use GitHub API to list directory contents
-	apiURL := fmt.Sprintf("https://api.github.com/repos/%s/contents/%s?ref=%s",
-		source.Location, source.Path, source.Branch)
+	// Use Git Trees API instead of Contents API to handle directories with 1000+ files
+	// The Contents API has a hard limit of 1000 items per directory
+	// First, get the tree SHA for the branch
+	refURL := fmt.Sprintf("https://api.github.com/repos/%s/git/ref/heads/%s",
+		source.Location, source.Branch)
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, apiURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, refURL, nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
-	// Use retry logic for GitHub API calls to handle rate limits and transient errors
 	resp, err := httpDoWithRetry(ctx, f.httpClient, req)
 	if err != nil {
-		return nil, fmt.Errorf("GitHub API request failed for %s: %w", apiURL, err)
+		return nil, fmt.Errorf("GitHub API request failed for %s: %w", refURL, err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitHub API returned HTTP %d for %s", resp.StatusCode, apiURL)
+		return nil, fmt.Errorf("GitHub API returned HTTP %d for %s", resp.StatusCode, refURL)
 	}
 
-	var files []struct {
-		Name        string `json:"name"`
-		DownloadURL string `json:"download_url"`
-		Type        string `json:"type"`
+	var refData struct {
+		Object struct {
+			SHA string `json:"sha"`
+		} `json:"object"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&refData); err != nil {
+		return nil, fmt.Errorf("failed to decode ref response: %w", err)
 	}
 
-	if err := json.NewDecoder(resp.Body).Decode(&files); err != nil {
+	// Now get the full tree recursively
+	treeURL := fmt.Sprintf("https://api.github.com/repos/%s/git/trees/%s?recursive=1",
+		source.Location, refData.Object.SHA)
+
+	req2, err := http.NewRequestWithContext(ctx, http.MethodGet, treeURL, nil)
+	if err != nil {
 		return nil, err
 	}
+	req2.Header.Set("Accept", "application/vnd.github.v3+json")
 
-	// Filter YAML files
+	resp2, err := httpDoWithRetry(ctx, f.httpClient, req2)
+	if err != nil {
+		return nil, fmt.Errorf("GitHub API request failed for tree: %w", err)
+	}
+	defer resp2.Body.Close()
+
+	if resp2.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("GitHub API returned HTTP %d for tree", resp2.StatusCode)
+	}
+
+	var treeData struct {
+		Tree []struct {
+			Path string `json:"path"`
+			Type string `json:"type"`
+		} `json:"tree"`
+		Truncated bool `json:"truncated"`
+	}
+	if err := json.NewDecoder(resp2.Body).Decode(&treeData); err != nil {
+		return nil, fmt.Errorf("failed to decode tree response: %w", err)
+	}
+
+	if treeData.Truncated {
+		if _, err := fmt.Fprintf(f.writer, "    ⚠️ Tree was truncated - repo may be very large\n"); err != nil {
+			return nil, err
+		}
+	}
+
+	// Filter YAML files in the target path
 	var yamlFiles []struct {
 		Name        string
 		DownloadURL string
 	}
-	for _, file := range files {
-		if file.Type == "file" && (strings.HasSuffix(file.Name, ".yaml") || strings.HasSuffix(file.Name, ".yml")) {
-			yamlFiles = append(yamlFiles, struct {
-				Name        string
-				DownloadURL string
-			}{Name: file.Name, DownloadURL: file.DownloadURL})
+	targetPath := source.Path
+	if !strings.HasSuffix(targetPath, "/") {
+		targetPath += "/"
+	}
+	for _, item := range treeData.Tree {
+		if item.Type == "blob" && strings.HasPrefix(item.Path, source.Path) {
+			filename := filepath.Base(item.Path)
+			if strings.HasSuffix(filename, ".yaml") || strings.HasSuffix(filename, ".yml") {
+				downloadURL := fmt.Sprintf("https://raw.githubusercontent.com/%s/%s/%s",
+					source.Location, source.Branch, item.Path)
+				yamlFiles = append(yamlFiles, struct {
+					Name        string
+					DownloadURL string
+				}{Name: filename, DownloadURL: downloadURL})
+			}
 		}
 	}
 
 	// Download CRDs in parallel with error collection
+	// Use fetchCRDsFromURL to handle multi-document YAML files (like crds.yml with multiple CRDs)
 	type crdResult struct {
-		crd *extv1.CustomResourceDefinition
-		err error
-		url string
+		crds []*extv1.CustomResourceDefinition
+		err  error
+		url  string
 	}
 
 	crdResults := make(chan crdResult, len(yamlFiles))
@@ -424,19 +471,26 @@ func (f *CRDSourceFetcher) prefetchAllFromGitHub(ctx context.Context, source CRD
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			crd, err := f.fetchCRDFromURL(ctx, downloadURL)
+			fetchedCRDs, err := f.fetchCRDsFromURL(ctx, downloadURL)
 			if err != nil {
 				crdResults <- crdResult{err: err, url: downloadURL}
 				return
 			}
 
-			// Only save valid CRDs
-			if crd != nil && crd.Kind == "CustomResourceDefinition" {
-				f.saveCRDToCache(cachePath, name, crd)
-				crdResults <- crdResult{crd: crd}
-			} else {
-				crdResults <- crdResult{} // Not a CRD, skip silently
+			// Save each valid CRD to cache
+			var validCRDs []*extv1.CustomResourceDefinition
+			for i, crd := range fetchedCRDs {
+				if crd != nil && crd.Kind == "CustomResourceDefinition" {
+					// Use index in filename for multi-doc files
+					cacheName := name
+					if len(fetchedCRDs) > 1 {
+						cacheName = fmt.Sprintf("%s-%d", strings.TrimSuffix(name, filepath.Ext(name)), i) + filepath.Ext(name)
+					}
+					f.saveCRDToCache(cachePath, cacheName, crd)
+					validCRDs = append(validCRDs, crd)
+				}
 			}
+			crdResults <- crdResult{crds: validCRDs}
 		}(file.Name, file.DownloadURL)
 	}
 
@@ -451,8 +505,8 @@ func (f *CRDSourceFetcher) prefetchAllFromGitHub(ctx context.Context, source CRD
 	for result := range crdResults {
 		if result.err != nil {
 			fetchErrors = append(fetchErrors, fmt.Sprintf("%s: %v", result.url, result.err))
-		} else if result.crd != nil {
-			crds = append(crds, result.crd)
+		} else if len(result.crds) > 0 {
+			crds = append(crds, result.crds...)
 		}
 	}
 
@@ -891,6 +945,18 @@ func (f *CRDSourceFetcher) fetchFromLocal(source CRDSource, requiredGVKs, foundG
 }
 
 func (f *CRDSourceFetcher) fetchCRDFromURL(ctx context.Context, url string) (*extv1.CustomResourceDefinition, error) {
+	crds, err := f.fetchCRDsFromURL(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	if len(crds) == 0 {
+		return nil, fmt.Errorf("no CRDs found in %s", url)
+	}
+	return crds[0], nil
+}
+
+// fetchCRDsFromURL fetches CRDs from a URL, handling multi-document YAML files.
+func (f *CRDSourceFetcher) fetchCRDsFromURL(ctx context.Context, url string) ([]*extv1.CustomResourceDefinition, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -912,12 +978,25 @@ func (f *CRDSourceFetcher) fetchCRDFromURL(ctx context.Context, url string) (*ex
 		return nil, err
 	}
 
-	var crd extv1.CustomResourceDefinition
-	if err := yaml.Unmarshal(data, &crd); err != nil {
-		return nil, err
+	// Handle multi-document YAML files (separated by ---)
+	var crds []*extv1.CustomResourceDefinition
+	docs := strings.Split(string(data), "\n---")
+	for _, doc := range docs {
+		doc = strings.TrimSpace(doc)
+		if doc == "" {
+			continue
+		}
+		var crd extv1.CustomResourceDefinition
+		if err := yaml.Unmarshal([]byte(doc), &crd); err != nil {
+			continue // Skip non-CRD documents
+		}
+		// Only include valid CRDs (must have a name and kind)
+		if crd.Name != "" && crd.Spec.Names.Kind != "" {
+			crds = append(crds, &crd)
+		}
 	}
 
-	return &crd, nil
+	return crds, nil
 }
 
 // fetchFromK8sSchemas fetches core K8s JSON schemas from yannh/kubernetes-json-schema
