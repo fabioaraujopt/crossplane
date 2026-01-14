@@ -51,15 +51,16 @@ type Cmd struct {
 	ErrorOnMissingSchemas bool   `default:"false"                                                                     help:"Return non zero exit code if not all schemas are provided."`
 
 	// New validation flags
-	ValidatePatches       bool `default:"true"  help:"Validate that patch fromFieldPath and toFieldPath exist in their respective schemas."`
-	DetectUnusedParams    bool `default:"true"  help:"Detect XRD parameters that are defined but never used in composition patches."`
-	ValidateStatusChains  bool `default:"true"  help:"Validate status field propagation through composition hierarchies."`
-	StrictMode            bool `default:"false" help:"Treat warnings (like unused parameters) as errors."`
-	SkipCompositionChecks bool `default:"false" help:"Skip composition-level validations (patch paths, unused params)."`
-	ShowTree              bool `default:"false" help:"Show composition tree hierarchy and per-composition analysis."`
-	ShowDetails           bool `default:"true"  help:"Show detailed error messages (invalid patches, unused params per composition)."`
-	AutoDiscoverProviders bool `default:"false" help:"Automatically discover and download provider schemas based on resources used in compositions."`
-	OnlyInvalid           bool `default:"false" help:"Only show invalid/error results, hide all success output."`
+	ValidatePatches           bool `default:"true"  help:"Validate that patch fromFieldPath and toFieldPath exist in their respective schemas."`
+	DetectUnusedParams        bool `default:"true"  help:"Detect XRD parameters that are defined but never used in composition patches."`
+	ValidateStatusChains      bool `default:"true"  help:"Validate status field propagation through composition hierarchies."`
+	ValidateResourceSelectors bool `default:"true"  help:"Validate resource selectors (like subnetIdSelector) for ambiguous matches across compositions."`
+	StrictMode                bool `default:"false" help:"Treat warnings (like unused parameters) as errors."`
+	SkipCompositionChecks     bool `default:"false" help:"Skip composition-level validations (patch paths, unused params)."`
+	ShowTree                  bool `default:"false" help:"Show composition tree hierarchy and per-composition analysis."`
+	ShowDetails               bool `default:"true"  help:"Show detailed error messages (invalid patches, unused params per composition)."`
+	AutoDiscoverProviders     bool `default:"false" help:"Automatically discover and download provider schemas based on resources used in compositions."`
+	OnlyInvalid               bool `default:"false" help:"Only show invalid/error results, hide all success output."`
 
 	// Cluster-based schema fetching
 	UseCluster             bool   `default:"false" help:"Fetch CRD schemas from a live Kubernetes cluster instead of downloading from registry."`
@@ -113,11 +114,17 @@ This command performs the following validations:
    - Reports parameters defined in XRD but never used in any patch
    - Helps identify dead configuration code
 
-4. STRICT MODE (--strict-mode):
+4. RESOURCE SELECTOR VALIDATION (--validate-resource-selectors, default: true):
+   - Detects ambiguous selectors (like subnetIdSelector) that could match resources from multiple stamps
+   - Warns when selectors don't use matchControllerRef and could cause cross-stamp resource attachment
+   - Detects orphaned selectors using labels that aren't created by any composition
+   - Recommends adding unique identifying labels (e.g., stamp-name) for isolation
+
+5. STRICT MODE (--strict-mode):
    - Treats warnings (unused parameters) as errors
    - Returns non-zero exit code for any issue
 
-5. CRD SOURCES (--crd-sources):
+6. CRD SOURCES (--crd-sources):
    - Fetch CRDs from multiple sources for complete validation
    - Built-in well-known sources: upjet-aws, upjet-azure, nats-operator, datree-catalog
    - Custom GitHub repos, local directories, or the Datree catalog
@@ -556,6 +563,29 @@ func (c *Cmd) Run(k *kong.Context, _ logging.Logger) error {
 				hasErrors = true
 			} else if c.StrictMode {
 				hasErrors = true
+			}
+		}
+
+		// 1f. Resource Selector Validation (subnetIdSelector, vpcIdSelector, etc.)
+		if c.ValidateResourceSelectors {
+			resourceSelectorValidator := NewResourceSelectorValidator(parser.GetCompositions())
+			resourceSelectorErrors := resourceSelectorValidator.Validate()
+
+			// Report resource selector issues
+			for _, rsErr := range resourceSelectorErrors {
+				prefix := "[x]"
+				if rsErr.Severity == "warning" {
+					prefix = "[!]"
+				}
+				if _, e := fmt.Fprintf(k.Stdout, "%s %s\n", prefix, rsErr.Error()); e != nil {
+					return errors.Wrap(e, errWriteOutput)
+				}
+
+				if rsErr.Severity == "error" {
+					hasErrors = true
+				} else if c.StrictMode {
+					hasErrors = true
+				}
 			}
 		}
 	}
