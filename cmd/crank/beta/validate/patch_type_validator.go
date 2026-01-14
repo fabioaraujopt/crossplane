@@ -2,6 +2,7 @@
 package validate
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -289,6 +290,45 @@ func (v *PatchTypeValidator) validateCombineFromComposite(compName string, patch
 		})
 	}
 
+	// Validate format string placeholder count matches variable count
+	if patch.Combine.String != nil && patch.Combine.String.Format != "" {
+		placeholderCount := strings.Count(patch.Combine.String.Format, "%s")
+		variableCount := len(patch.Combine.Variables)
+
+		if placeholderCount != variableCount {
+			errors = append(errors, PatchTypeValidationError{
+				CompositionName: compName,
+				ResourceName:    patchInfo.ResourceName,
+				PatchIndex:      patchInfo.PatchIndex,
+				PatchType:       string(PatchTypeCombineFromComposite),
+				SourceFile:      patchInfo.SourceFile,
+				SourceLine:      patchInfo.SourceLine,
+				Message: fmt.Sprintf(
+					"composition '%s' resource '%s' patch[%d]: format string has %d placeholder(s) (%%s) but %d variable(s) defined - mismatch will cause runtime error",
+					compName, patchInfo.ResourceName, patchInfo.PatchIndex, placeholderCount, variableCount),
+				Severity: "error",
+			})
+		}
+
+		// Validate JSON template if toFieldPath suggests it should be JSON
+		if isJSONField(patch.ToFieldPath) {
+			if err := validateJSONTemplate(patch.Combine.String.Format, variableCount); err != nil {
+				errors = append(errors, PatchTypeValidationError{
+					CompositionName: compName,
+					ResourceName:    patchInfo.ResourceName,
+					PatchIndex:      patchInfo.PatchIndex,
+					PatchType:       string(PatchTypeCombineFromComposite),
+					SourceFile:      patchInfo.SourceFile,
+					SourceLine:      patchInfo.SourceLine,
+					Message: fmt.Sprintf(
+						"composition '%s' resource '%s' patch[%d]: format string template appears to be invalid JSON: %v",
+						compName, patchInfo.ResourceName, patchInfo.PatchIndex, err),
+					Severity: "warning",
+				})
+			}
+		}
+	}
+
 	return errors
 }
 
@@ -479,4 +519,30 @@ func contains(slice []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// isJSONField checks if a field path likely contains JSON data.
+func isJSONField(fieldPath string) bool {
+	fieldLower := strings.ToLower(fieldPath)
+	return strings.Contains(fieldLower, "policy") ||
+		strings.Contains(fieldLower, "json") ||
+		strings.Contains(fieldLower, "assumerolepolicy") ||
+		strings.Contains(fieldLower, "document")
+}
+
+// validateJSONTemplate validates that a format string template produces valid JSON.
+func validateJSONTemplate(template string, variableCount int) error {
+	// Replace all %s placeholders with dummy values
+	testStr := template
+	for i := 0; i < variableCount; i++ {
+		testStr = strings.Replace(testStr, "%s", "test-value", 1)
+	}
+
+	// Try to parse as JSON
+	var js interface{}
+	if err := json.Unmarshal([]byte(testStr), &js); err != nil {
+		return err
+	}
+
+	return nil
 }

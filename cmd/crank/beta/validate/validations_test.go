@@ -3467,6 +3467,416 @@ func TestPatchTypeValidator_ValidCombineFromComposite(t *testing.T) {
 	}
 }
 
+func TestPatchTypeValidator_CombineFromCompositeFormatStringMismatch(t *testing.T) {
+	// CombineFromComposite with mismatched variable count vs placeholder count - should error
+	// This is the EBS CSI driver IAM role trust policy case
+
+	composition := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v1",
+			"kind":       "Composition",
+			"metadata": map[string]interface{}{
+				"name": "test-comp",
+			},
+			"spec": map[string]interface{}{
+				"compositeTypeRef": map[string]interface{}{
+					"apiVersion": "example.com/v1alpha1",
+					"kind":       "TestXR",
+				},
+				"mode": "Pipeline",
+				"pipeline": []interface{}{
+					map[string]interface{}{
+						"step": "patch-and-transform",
+						"functionRef": map[string]interface{}{
+							"name": "function-patch-and-transform",
+						},
+						"input": map[string]interface{}{
+							"apiVersion": "pt.fn.crossplane.io/v1beta1",
+							"kind":       "Resources",
+							"resources": []interface{}{
+								map[string]interface{}{
+									"name": "test-resource",
+									"base": map[string]interface{}{
+										"apiVersion": "test.io/v1beta1",
+										"kind":       "TestResource",
+									},
+									"patches": []interface{}{
+										map[string]interface{}{
+											"type": "CombineFromComposite",
+											"combine": map[string]interface{}{
+												"variables": []interface{}{
+													map[string]interface{}{"fromFieldPath": "spec.accountId"},
+													map[string]interface{}{"fromFieldPath": "status.oidcHostname"},
+													map[string]interface{}{"fromFieldPath": "status.oidcId"},
+													map[string]interface{}{"fromFieldPath": "status.oidcHostname"},
+													map[string]interface{}{"fromFieldPath": "status.oidcId"}, // 5 variables
+												},
+												"strategy": "string",
+												"string": map[string]interface{}{
+													"fmt": `{
+  "Principal": {"Federated": "arn:aws:iam::%s:oidc-provider/%s"},
+  "Condition": {"%s:aud": "sts.amazonaws.com"}
+}`, // Only 3 placeholders!
+												},
+											},
+											"toFieldPath": "spec.forProvider.assumeRolePolicy",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	xrd := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v1",
+			"kind":       "CompositeResourceDefinition",
+			"metadata": map[string]interface{}{
+				"name": "testxrs.example.com",
+			},
+			"spec": map[string]interface{}{
+				"group": "example.com",
+				"names": map[string]interface{}{
+					"kind":   "TestXR",
+					"plural": "testxrs",
+				},
+			},
+		},
+	}
+
+	parser := NewCompositionParser()
+	err := parser.Parse([]*unstructured.Unstructured{composition, xrd})
+	if err != nil {
+		t.Fatalf("Failed to parse: %v", err)
+	}
+
+	validator := NewPatchTypeValidator(parser.GetCompositions())
+	var buf strings.Builder
+	result, err := validator.Validate(&buf)
+	if err != nil {
+		t.Fatalf("Validation failed: %v", err)
+	}
+
+	if len(result.Errors) == 0 {
+		t.Fatal("Expected error for format string mismatch, got none")
+	}
+
+	found := false
+	for _, err := range result.Errors {
+		if strings.Contains(err.Message, "format string has 3 placeholder(s)") &&
+			strings.Contains(err.Message, "5 variable(s) defined") {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected error about placeholder/variable mismatch, got: %v", result.Errors)
+	}
+}
+
+func TestPatchTypeValidator_CombineFromCompositeValidFormatString(t *testing.T) {
+	// CombineFromComposite with matching variable count and placeholder count - should pass
+
+	composition := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v1",
+			"kind":       "Composition",
+			"metadata": map[string]interface{}{
+				"name": "test-comp",
+			},
+			"spec": map[string]interface{}{
+				"compositeTypeRef": map[string]interface{}{
+					"apiVersion": "example.com/v1alpha1",
+					"kind":       "TestXR",
+				},
+				"mode": "Pipeline",
+				"pipeline": []interface{}{
+					map[string]interface{}{
+						"step": "patch-and-transform",
+						"functionRef": map[string]interface{}{
+							"name": "function-patch-and-transform",
+						},
+						"input": map[string]interface{}{
+							"apiVersion": "pt.fn.crossplane.io/v1beta1",
+							"kind":       "Resources",
+							"resources": []interface{}{
+								map[string]interface{}{
+									"name": "test-resource",
+									"base": map[string]interface{}{
+										"apiVersion": "test.io/v1beta1",
+										"kind":       "TestResource",
+									},
+									"patches": []interface{}{
+										map[string]interface{}{
+											"type": "CombineFromComposite",
+											"combine": map[string]interface{}{
+												"variables": []interface{}{
+													map[string]interface{}{"fromFieldPath": "spec.accountId"},
+													map[string]interface{}{"fromFieldPath": "status.oidcHostname"},
+													map[string]interface{}{"fromFieldPath": "status.oidcHostname"},
+													map[string]interface{}{"fromFieldPath": "status.oidcHostname"},
+												},
+												"strategy": "string",
+												"string": map[string]interface{}{
+													"fmt": `{
+  "Principal": {"Federated": "arn:aws:iam::%s:oidc-provider/%s"},
+  "Condition": {
+    "%s:aud": "sts.amazonaws.com",
+    "%s:sub": "system:serviceaccount:kube-system:ebs-csi-controller-sa"
+  }
+}`, // 4 placeholders matching 4 variables
+												},
+											},
+											"toFieldPath": "spec.forProvider.assumeRolePolicy",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	xrd := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v1",
+			"kind":       "CompositeResourceDefinition",
+			"metadata": map[string]interface{}{
+				"name": "testxrs.example.com",
+			},
+			"spec": map[string]interface{}{
+				"group": "example.com",
+				"names": map[string]interface{}{
+					"kind":   "TestXR",
+					"plural": "testxrs",
+				},
+			},
+		},
+	}
+
+	parser := NewCompositionParser()
+	err := parser.Parse([]*unstructured.Unstructured{composition, xrd})
+	if err != nil {
+		t.Fatalf("Failed to parse: %v", err)
+	}
+
+	validator := NewPatchTypeValidator(parser.GetCompositions())
+	var buf strings.Builder
+	result, err := validator.Validate(&buf)
+	if err != nil {
+		t.Fatalf("Validation failed: %v", err)
+	}
+
+	// Should have no errors for matching count
+	if len(result.Errors) > 0 {
+		t.Errorf("Expected no errors for valid format string, got: %v", result.Errors)
+	}
+}
+
+func TestPatchTypeValidator_CombineFromCompositeInvalidJSON(t *testing.T) {
+	// CombineFromComposite with invalid JSON template - should warn
+
+	composition := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v1",
+			"kind":       "Composition",
+			"metadata": map[string]interface{}{
+				"name": "test-comp",
+			},
+			"spec": map[string]interface{}{
+				"compositeTypeRef": map[string]interface{}{
+					"apiVersion": "example.com/v1alpha1",
+					"kind":       "TestXR",
+				},
+				"mode": "Pipeline",
+				"pipeline": []interface{}{
+					map[string]interface{}{
+						"step": "patch-and-transform",
+						"functionRef": map[string]interface{}{
+							"name": "function-patch-and-transform",
+						},
+						"input": map[string]interface{}{
+							"apiVersion": "pt.fn.crossplane.io/v1beta1",
+							"kind":       "Resources",
+							"resources": []interface{}{
+								map[string]interface{}{
+									"name": "test-resource",
+									"base": map[string]interface{}{
+										"apiVersion": "test.io/v1beta1",
+										"kind":       "TestResource",
+									},
+									"patches": []interface{}{
+										map[string]interface{}{
+											"type": "CombineFromComposite",
+											"combine": map[string]interface{}{
+												"variables": []interface{}{
+													map[string]interface{}{"fromFieldPath": "spec.value"},
+												},
+												"strategy": "string",
+												"string": map[string]interface{}{
+													"fmt": `{
+  "key": "%s",
+  trailing: "comma",
+}`, // Invalid JSON - missing quotes around key
+												},
+											},
+											"toFieldPath": "spec.forProvider.assumeRolePolicy",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	xrd := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v1",
+			"kind":       "CompositeResourceDefinition",
+			"metadata": map[string]interface{}{
+				"name": "testxrs.example.com",
+			},
+			"spec": map[string]interface{}{
+				"group": "example.com",
+				"names": map[string]interface{}{
+					"kind":   "TestXR",
+					"plural": "testxrs",
+				},
+			},
+		},
+	}
+
+	parser := NewCompositionParser()
+	err := parser.Parse([]*unstructured.Unstructured{composition, xrd})
+	if err != nil {
+		t.Fatalf("Failed to parse: %v", err)
+	}
+
+	validator := NewPatchTypeValidator(parser.GetCompositions())
+	var buf strings.Builder
+	result, err := validator.Validate(&buf)
+	if err != nil {
+		t.Fatalf("Validation failed: %v", err)
+	}
+
+	// Should have a warning for invalid JSON (warnings are in the Errors array with Severity="warning")
+	if len(result.Errors) == 0 {
+		t.Error("Expected warning for invalid JSON template, got none")
+	}
+
+	found := false
+	for _, err := range result.Errors {
+		if err.Severity == "warning" && strings.Contains(err.Message, "invalid JSON") {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected warning about invalid JSON, got: %v", result.Errors)
+	}
+}
+
+func TestPatchTypeValidator_CombineFromCompositeNoFormatString(t *testing.T) {
+	// CombineFromComposite without string.fmt - should still pass basic validation
+
+	composition := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v1",
+			"kind":       "Composition",
+			"metadata": map[string]interface{}{
+				"name": "test-comp",
+			},
+			"spec": map[string]interface{}{
+				"compositeTypeRef": map[string]interface{}{
+					"apiVersion": "example.com/v1alpha1",
+					"kind":       "TestXR",
+				},
+				"mode": "Pipeline",
+				"pipeline": []interface{}{
+					map[string]interface{}{
+						"step": "patch-and-transform",
+						"functionRef": map[string]interface{}{
+							"name": "function-patch-and-transform",
+						},
+						"input": map[string]interface{}{
+							"apiVersion": "pt.fn.crossplane.io/v1beta1",
+							"kind":       "Resources",
+							"resources": []interface{}{
+								map[string]interface{}{
+									"name": "test-resource",
+									"base": map[string]interface{}{
+										"apiVersion": "test.io/v1beta1",
+										"kind":       "TestResource",
+									},
+									"patches": []interface{}{
+										map[string]interface{}{
+											"type": "CombineFromComposite",
+											"combine": map[string]interface{}{
+												"variables": []interface{}{
+													map[string]interface{}{"fromFieldPath": "spec.value"},
+												},
+												"strategy": "string",
+												// No string.fmt specified
+											},
+											"toFieldPath": "spec.forProvider.value",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	xrd := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v1",
+			"kind":       "CompositeResourceDefinition",
+			"metadata": map[string]interface{}{
+				"name": "testxrs.example.com",
+			},
+			"spec": map[string]interface{}{
+				"group": "example.com",
+				"names": map[string]interface{}{
+					"kind":   "TestXR",
+					"plural": "testxrs",
+				},
+			},
+		},
+	}
+
+	parser := NewCompositionParser()
+	err := parser.Parse([]*unstructured.Unstructured{composition, xrd})
+	if err != nil {
+		t.Fatalf("Failed to parse: %v", err)
+	}
+
+	validator := NewPatchTypeValidator(parser.GetCompositions())
+	var buf strings.Builder
+	result, err := validator.Validate(&buf)
+	if err != nil {
+		t.Fatalf("Validation failed: %v", err)
+	}
+
+	// Should have no errors - format string validation is optional
+	if len(result.Errors) > 0 {
+		t.Errorf("Expected no errors when format string is not specified, got: %v", result.Errors)
+	}
+}
+
 func TestPatchTypeValidator_FromCompositeWithoutFromFieldPath(t *testing.T) {
 	// FromCompositeFieldPath without fromFieldPath - should error
 
