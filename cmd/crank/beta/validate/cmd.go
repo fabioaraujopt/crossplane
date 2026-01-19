@@ -62,6 +62,10 @@ type Cmd struct {
 	AutoDiscoverProviders     bool `default:"false" help:"Automatically discover and download provider schemas based on resources used in compositions."`
 	OnlyInvalid               bool `default:"false" help:"Only show invalid/error results, hide all success output."`
 
+	// Deletion safety validation flags
+	ValidateDeletionSafety bool `default:"true"  help:"Validate deletion safety patterns (rollbackLimit, IAM Usage, label matching)."`
+	ShowDeletionOrder      bool `default:"false" help:"Show the deletion order based on ClusterUsage objects."`
+
 	// Cluster-based schema fetching
 	UseCluster             bool   `default:"false" help:"Fetch CRD schemas from a live Kubernetes cluster instead of downloading from registry."`
 	Kubeconfig             string `help:"Path to kubeconfig file. Uses default kubeconfig if not specified." predictor:"file"`
@@ -129,6 +133,13 @@ This command performs the following validations:
    - Built-in well-known sources: upjet-aws, upjet-azure, nats-operator, datree-catalog
    - Custom GitHub repos, local directories, or the Datree catalog
    - Caches downloaded CRDs for faster subsequent runs
+
+7. DELETION SAFETY VALIDATION (--validate-deletion-safety, default: true):
+   - Validates Helm releases have rollbackLimit set (prevents permanent failure)
+   - Detects IRSA usage without IAM → Helm ClusterUsage protection
+   - Validates ClusterUsage selector labels match target resources
+   - Checks for known cross-composition deletion dependencies
+   - Use --show-deletion-order to visualize the deletion sequence
 
 Examples:
 
@@ -635,6 +646,43 @@ func (c *Cmd) Run(k *kong.Context, _ logging.Logger) error {
 			if err := PrintTreeAnalysis(treeResult, k.Stdout, c.ShowDetails); err != nil {
 				return errors.Wrapf(err, "cannot print tree analysis")
 			}
+		}
+	}
+
+	// 4. Deletion Safety Validation
+	if !c.SkipCompositionChecks && c.ValidateDeletionSafety {
+		allObjects := append(extensions, resources...)
+
+		// Parse compositions
+		parser := NewCompositionParser()
+		if err := parser.Parse(allObjects); err != nil {
+			return errors.Wrapf(err, "cannot parse compositions for deletion safety validation")
+		}
+
+		// Create and run deletion safety validator
+		deletionValidator := NewDeletionSafetyValidator(parser.GetCompositions(), allObjects)
+		deletionResult := deletionValidator.Validate()
+
+		// Print results
+		if err := PrintDeletionSafetyResults(deletionResult, k.Stdout, c.ShowDeletionOrder); err != nil {
+			return errors.Wrapf(err, "cannot print deletion safety results")
+		}
+
+		// Show deletion order if requested
+		if c.ShowDeletionOrder {
+			if err := deletionValidator.PrintDeletionOrder(deletionResult.DeletionOrder, k.Stdout); err != nil {
+				return errors.Wrapf(err, "cannot print deletion order")
+			}
+		}
+
+		// Check for errors
+		if deletionResult.HasErrors() {
+			hasErrors = true
+		}
+
+		// In strict mode, treat warnings as errors
+		if c.StrictMode && deletionResult.HasWarnings() {
+			hasErrors = true
 		}
 	}
 
