@@ -463,9 +463,25 @@ func labelsMatch(selector, target map[string]string) bool {
 func (v *CompositionSelectorValidator) detectUnusedCompositions() []string {
 	var unused []string
 
+	// First, find all kinds that are referenced as child XRs
+	referencedKinds := make(map[string]bool)
+	for _, comp := range v.compositions {
+		for _, res := range comp.Resources {
+			if res.Base != nil {
+				referencedKinds[res.Base.GetKind()] = true
+			}
+		}
+	}
+
 	for name, comp := range v.compositions {
 		// Skip compositions without labels (can't be selected anyway)
 		if len(comp.Labels) == 0 {
+			continue
+		}
+
+		// Skip ROOT compositions (entry points) - their kind is not referenced by any other composition
+		// These are created directly by users, not selected by compositionSelector
+		if !referencedKinds[comp.CompositeTypeRef.Kind] {
 			continue
 		}
 

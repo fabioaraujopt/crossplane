@@ -322,13 +322,30 @@ func (p *CompositionParser) parseComposition(obj *unstructured.Unstructured) (*P
 				composedRes.BaseGVK = composedRes.Base.GroupVersionKind()
 
 				// Extract compositionSelector.matchLabels (for child XRs)
+				// Check both spec.compositionSelector and spec.crossplane.compositionSelector
 				if spec, ok := base["spec"].(map[string]interface{}); ok {
+					// Try spec.compositionSelector first
 					if selector, ok := spec["compositionSelector"].(map[string]interface{}); ok {
 						if matchLabels, ok := selector["matchLabels"].(map[string]interface{}); ok {
 							composedRes.CompositionSelector = make(map[string]string)
 							for k, v := range matchLabels {
 								if strVal, ok := v.(string); ok {
 									composedRes.CompositionSelector[k] = strVal
+								}
+							}
+						}
+					}
+					// Also try spec.crossplane.compositionSelector (Crossplane v2 style)
+					if composedRes.CompositionSelector == nil {
+						if crossplane, ok := spec["crossplane"].(map[string]interface{}); ok {
+							if selector, ok := crossplane["compositionSelector"].(map[string]interface{}); ok {
+								if matchLabels, ok := selector["matchLabels"].(map[string]interface{}); ok {
+									composedRes.CompositionSelector = make(map[string]string)
+									for k, v := range matchLabels {
+										if strVal, ok := v.(string); ok {
+											composedRes.CompositionSelector[k] = strVal
+										}
+									}
 								}
 							}
 						}
