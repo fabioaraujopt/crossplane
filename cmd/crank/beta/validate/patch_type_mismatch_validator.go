@@ -356,7 +356,8 @@ func (v *PatchTypeMismatchValidator) ValidateStatusTypes() []TypeMismatchError {
 			childType := v.getFieldType(childSchema, patchInfo.Patch.FromFieldPath)
 			parentType := v.getFieldType(parentSchema, patchInfo.Patch.ToFieldPath)
 
-			if childType != "" && parentType != "" && childType != parentType {
+			// Use typesCompatible to allow compatible conversions (e.g., number → integer)
+			if childType != "" && parentType != "" && !v.typesCompatible(childType, parentType) {
 				errors = append(errors, TypeMismatchError{
 					CompositionName: patchInfo.CompositionName,
 					ResourceName:    patchInfo.ResourceName,
