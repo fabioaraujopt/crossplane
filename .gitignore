@@ -42,3 +42,8 @@ AGENTS.md
 # Built binaries
 crossplane-full-validator
 crank
+
+# Local build binaries
+crossplane-test
+crossplane-validator
+crossplane-full-validator
