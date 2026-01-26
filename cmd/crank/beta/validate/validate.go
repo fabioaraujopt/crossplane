@@ -43,6 +43,45 @@ const (
 	errWriteOutput = "cannot write output"
 )
 
+// internalAnnotations are annotations added by the validator for tracking purposes.
+// These should be stripped before schema validation to avoid false positives.
+var internalAnnotations = []string{
+	load.AnnotationSourceFile,
+	load.AnnotationSourceLine,
+	"crossplane.io/base-resource-name",
+}
+
+// stripInternalAnnotations returns a copy of the resource with internal tracking
+// annotations removed. This prevents false positive validation errors when
+// validating against strict Kubernetes schemas that don't allow arbitrary annotations.
+func stripInternalAnnotations(r *unstructured.Unstructured) *unstructured.Unstructured {
+	// Create a deep copy to avoid modifying the original
+	copy := r.DeepCopy()
+	annotations := copy.GetAnnotations()
+	if annotations == nil {
+		return copy
+	}
+
+	// Remove internal annotations
+	modified := false
+	for _, key := range internalAnnotations {
+		if _, exists := annotations[key]; exists {
+			delete(annotations, key)
+			modified = true
+		}
+	}
+
+	if modified {
+		if len(annotations) == 0 {
+			copy.SetAnnotations(nil)
+		} else {
+			copy.SetAnnotations(annotations)
+		}
+	}
+
+	return copy
+}
+
 func newValidatorsAndStructurals(crds []*extv1.CustomResourceDefinition) (map[runtimeschema.GroupVersionKind][]*validation.SchemaValidator, map[runtimeschema.GroupVersionKind]*schema.Structural, error) {
 	validators := map[runtimeschema.GroupVersionKind][]*validation.SchemaValidator{}
 	structurals := map[runtimeschema.GroupVersionKind]*schema.Structural{}
@@ -160,8 +199,11 @@ func SchemaValidationWithPatches(ctx context.Context, resources []*unstructured.
 
 		rf := 0
 		for _, v := range sv {
-			schemaErrors := validation.ValidateCustomResource(nil, r, *v)
-			unknownFieldErrors := validateUnknownFields(r.UnstructuredContent(), s)
+			// Strip internal tracking annotations before validation to avoid false positives
+			// when validating against strict K8s schemas that don't allow arbitrary annotations
+			cleanResource := stripInternalAnnotations(r)
+			schemaErrors := validation.ValidateCustomResource(nil, cleanResource, *v)
+			unknownFieldErrors := validateUnknownFields(cleanResource.UnstructuredContent(), s)
 
 			// Combine errors
 			allErrors := append(schemaErrors, unknownFieldErrors...)
@@ -196,7 +238,7 @@ func SchemaValidationWithPatches(ctx context.Context, resources []*unstructured.
 
 			celValidator := cel.NewValidator(s, true, celconfig.PerCallLimit)
 
-			celErrors, _ := celValidator.Validate(ctx, nil, s, r.Object, nil, celconfig.PerCallLimit)
+			celErrors, _ := celValidator.Validate(ctx, nil, s, cleanResource.Object, nil, celconfig.PerCallLimit)
 
 			// Filter CEL required field errors too
 			if patchCollector != nil && baseResourceName != "" {

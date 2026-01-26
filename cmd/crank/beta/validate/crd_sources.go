@@ -1346,6 +1346,116 @@ func (f *CRDSourceFetcher) loadK8sFromCache(cachePath string, requiredGVKs, foun
 	return crds, foundAny
 }
 
+// schemaResolver holds the definitions for resolving $ref references in JSON schemas.
+type schemaResolver struct {
+	definitions map[string]interface{}
+	baseURL     string
+	httpClient  *http.Client
+	ctx         context.Context
+	cache       map[string]map[string]interface{} // Cache for fetched definition files
+}
+
+// newSchemaResolver creates a new schema resolver.
+func newSchemaResolver(ctx context.Context, httpClient *http.Client, baseURL string) *schemaResolver {
+	return &schemaResolver{
+		definitions: make(map[string]interface{}),
+		baseURL:     baseURL,
+		httpClient:  httpClient,
+		ctx:         ctx,
+		cache:       make(map[string]map[string]interface{}),
+	}
+}
+
+// resolveRef resolves a $ref reference and returns the referenced schema.
+// Handles both local (#/definitions/...) and remote ($ref to _definitions.json) references.
+func (r *schemaResolver) resolveRef(ref string) (map[string]interface{}, error) {
+	// Handle remote references like:
+	// https://raw.githubusercontent.com/yannh/kubernetes-json-schema/master/v1.34.0/_definitions.json#/definitions/io.k8s.api.admissionregistration.v1.ValidatingAdmissionPolicySpec
+	if strings.Contains(ref, "_definitions.json#") {
+		parts := strings.SplitN(ref, "#", 2)
+		if len(parts) != 2 {
+			return nil, fmt.Errorf("invalid $ref format: %s", ref)
+		}
+
+		definitionsURL := parts[0]
+		defPath := parts[1] // e.g., /definitions/io.k8s.api.admissionregistration.v1.ValidatingAdmissionPolicySpec
+
+		// Fetch definitions file if not cached
+		definitions, ok := r.cache[definitionsURL]
+		if !ok {
+			var err error
+			definitions, err = r.fetchDefinitions(definitionsURL)
+			if err != nil {
+				return nil, err
+			}
+			r.cache[definitionsURL] = definitions
+		}
+
+		// Navigate to the definition
+		// defPath is like /definitions/io.k8s.api...
+		pathParts := strings.Split(strings.TrimPrefix(defPath, "/"), "/")
+		current := interface{}(definitions)
+		for _, part := range pathParts {
+			if part == "" {
+				continue
+			}
+			if m, ok := current.(map[string]interface{}); ok {
+				current = m[part]
+			} else {
+				return nil, fmt.Errorf("cannot navigate to %s in definitions", defPath)
+			}
+		}
+
+		if result, ok := current.(map[string]interface{}); ok {
+			return result, nil
+		}
+		return nil, fmt.Errorf("definition not found: %s", defPath)
+	}
+
+	// Handle local references like #/definitions/...
+	if strings.HasPrefix(ref, "#/definitions/") {
+		defName := strings.TrimPrefix(ref, "#/definitions/")
+		if def, ok := r.definitions[defName]; ok {
+			if defMap, ok := def.(map[string]interface{}); ok {
+				return defMap, nil
+			}
+		}
+		return nil, fmt.Errorf("local definition not found: %s", defName)
+	}
+
+	return nil, fmt.Errorf("unsupported $ref format: %s", ref)
+}
+
+// fetchDefinitions fetches the _definitions.json file from a URL.
+func (r *schemaResolver) fetchDefinitions(url string) (map[string]interface{}, error) {
+	req, err := http.NewRequestWithContext(r.ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	resp, err := r.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("HTTP %d fetching definitions", resp.StatusCode)
+	}
+
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var definitions map[string]interface{}
+	if err := json.Unmarshal(data, &definitions); err != nil {
+		return nil, err
+	}
+
+	return definitions, nil
+}
+
 // fetchJSONSchemaAsCRD fetches a JSON schema and converts it to a CRD for validation.
 func (f *CRDSourceFetcher) fetchJSONSchemaAsCRD(ctx context.Context, url, group, version, kind string) (*extv1.CustomResourceDefinition, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -1374,8 +1484,14 @@ func (f *CRDSourceFetcher) fetchJSONSchemaAsCRD(ctx context.Context, url, group,
 		return nil, err
 	}
 
-	// Convert JSON schema to OpenAPI v3 schema (they're similar)
-	openAPISchema := convertJSONSchemaToOpenAPI(schema)
+	// Extract base URL for resolving relative $refs
+	baseURL := url[:strings.LastIndex(url, "/")+1]
+
+	// Create a schema resolver for handling $ref
+	resolver := newSchemaResolver(ctx, f.httpClient, baseURL)
+
+	// Convert JSON schema to OpenAPI v3 schema with $ref resolution
+	openAPISchema := convertJSONSchemaToOpenAPIWithResolver(schema, resolver, 0)
 
 	// Create a synthetic CRD for validation
 	crd := &extv1.CustomResourceDefinition{
@@ -1402,8 +1518,45 @@ func (f *CRDSourceFetcher) fetchJSONSchemaAsCRD(ctx context.Context, url, group,
 }
 
 // convertJSONSchemaToOpenAPI converts a JSON Schema to OpenAPI v3 schema format.
+// This is kept for backward compatibility with code that doesn't need $ref resolution.
 func convertJSONSchemaToOpenAPI(schema map[string]interface{}) *extv1.JSONSchemaProps {
+	return convertJSONSchemaToOpenAPIWithResolver(schema, nil, 0)
+}
+
+// convertJSONSchemaToOpenAPIWithResolver converts a JSON Schema to OpenAPI v3 schema format
+// with support for resolving $ref references. The depth parameter prevents infinite recursion.
+func convertJSONSchemaToOpenAPIWithResolver(schema map[string]interface{}, resolver *schemaResolver, depth int) *extv1.JSONSchemaProps {
+	// Prevent infinite recursion (K8s schemas can be deeply nested)
+	const maxDepth = 15
+	if depth > maxDepth {
+		// Return a permissive schema for deeply nested types
+		return &extv1.JSONSchemaProps{
+			XPreserveUnknownFields: boolPtr(true),
+		}
+	}
+
 	result := &extv1.JSONSchemaProps{}
+
+	// Handle $ref first - resolve the reference and merge with current schema
+	if ref, ok := schema["$ref"].(string); ok && resolver != nil {
+		resolved, err := resolver.resolveRef(ref)
+		if err == nil {
+			// Merge resolved schema with current schema (current takes precedence for description)
+			mergedSchema := make(map[string]interface{})
+			for k, v := range resolved {
+				mergedSchema[k] = v
+			}
+			// Override with local properties (e.g., description)
+			for k, v := range schema {
+				if k != "$ref" {
+					mergedSchema[k] = v
+				}
+			}
+			return convertJSONSchemaToOpenAPIWithResolver(mergedSchema, resolver, depth+1)
+		}
+		// If resolution fails, continue with what we have (allow unknown fields)
+		result.XPreserveUnknownFields = boolPtr(true)
+	}
 
 	if desc, ok := schema["description"].(string); ok {
 		result.Description = desc
@@ -1425,23 +1578,49 @@ func convertJSONSchemaToOpenAPI(schema map[string]interface{}) *extv1.JSONSchema
 		}
 	}
 
+	// Handle enum values
+	if enum, ok := schema["enum"].([]interface{}); ok {
+		for _, e := range enum {
+			if jsonVal, err := json.Marshal(e); err == nil {
+				result.Enum = append(result.Enum, extv1.JSON{Raw: jsonVal})
+			}
+		}
+	}
+
+	// Handle format
+	if format, ok := schema["format"].(string); ok {
+		result.Format = format
+	}
+
+	// Handle default value
+	if def, ok := schema["default"]; ok {
+		if jsonVal, err := json.Marshal(def); err == nil {
+			result.Default = &extv1.JSON{Raw: jsonVal}
+		}
+	}
+
 	if props, ok := schema["properties"].(map[string]interface{}); ok {
 		result.Properties = make(map[string]extv1.JSONSchemaProps)
 		for name, propSchema := range props {
 			if propMap, ok := propSchema.(map[string]interface{}); ok {
-				result.Properties[name] = *convertJSONSchemaToOpenAPI(propMap)
+				result.Properties[name] = *convertJSONSchemaToOpenAPIWithResolver(propMap, resolver, depth+1)
 			}
 		}
 	}
 
 	if items, ok := schema["items"].(map[string]interface{}); ok {
-		converted := convertJSONSchemaToOpenAPI(items)
+		converted := convertJSONSchemaToOpenAPIWithResolver(items, resolver, depth+1)
 		result.Items = &extv1.JSONSchemaPropsOrArray{Schema: converted}
 	}
 
-	if additionalProps, ok := schema["additionalProperties"].(map[string]interface{}); ok {
-		converted := convertJSONSchemaToOpenAPI(additionalProps)
-		result.AdditionalProperties = &extv1.JSONSchemaPropsOrBool{Schema: converted}
+	if additionalProps, ok := schema["additionalProperties"]; ok {
+		switch v := additionalProps.(type) {
+		case map[string]interface{}:
+			converted := convertJSONSchemaToOpenAPIWithResolver(v, resolver, depth+1)
+			result.AdditionalProperties = &extv1.JSONSchemaPropsOrBool{Schema: converted}
+		case bool:
+			result.AdditionalProperties = &extv1.JSONSchemaPropsOrBool{Allows: v}
+		}
 	}
 
 	if required, ok := schema["required"].([]interface{}); ok {
@@ -1452,7 +1631,35 @@ func convertJSONSchemaToOpenAPI(schema map[string]interface{}) *extv1.JSONSchema
 		}
 	}
 
+	// Handle minimum/maximum for numbers
+	if min, ok := schema["minimum"].(float64); ok {
+		result.Minimum = &min
+	}
+	if max, ok := schema["maximum"].(float64); ok {
+		result.Maximum = &max
+	}
+
+	// Handle minLength/maxLength for strings
+	if minLen, ok := schema["minLength"].(float64); ok {
+		minLenInt := int64(minLen)
+		result.MinLength = &minLenInt
+	}
+	if maxLen, ok := schema["maxLength"].(float64); ok {
+		maxLenInt := int64(maxLen)
+		result.MaxLength = &maxLenInt
+	}
+
+	// Handle pattern for strings
+	if pattern, ok := schema["pattern"].(string); ok {
+		result.Pattern = pattern
+	}
+
 	return result
+}
+
+// boolPtr returns a pointer to a bool value.
+func boolPtr(b bool) *bool {
+	return &b
 }
 
 func (f *CRDSourceFetcher) loadFromCache(cachePath string, requiredGVKs, foundGVKs map[string]bool) ([]*extv1.CustomResourceDefinition, bool) {
