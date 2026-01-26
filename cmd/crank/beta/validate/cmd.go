@@ -66,6 +66,12 @@ type Cmd struct {
 	ValidateDeletionSafety bool `default:"true"  help:"Validate deletion safety patterns (rollbackLimit, IAM Usage, label matching)."`
 	ShowDeletionOrder      bool `default:"false" help:"Show the deletion order based on ClusterUsage objects."`
 
+	// Tag validation flags
+	ValidateTags        bool     `default:"true"  help:"Validate cloud resource tagging patterns (tag-manager presence, required tags, tag propagation)."`
+	RequiredTags        []string `default:"ManagedBy,StampName,Environment" help:"Required tags for cloud resources. Comma-separated list." sep:","`
+	ShowTagAnalysis     bool     `default:"false" help:"Show detailed tag propagation analysis tree."`
+	SkipTagCompositions []string `help:"Composition names to skip in tag validation. Comma-separated list." sep:","`
+
 	// Cluster-based schema fetching
 	UseCluster             bool   `default:"false" help:"Fetch CRD schemas from a live Kubernetes cluster instead of downloading from registry."`
 	Kubeconfig             string `help:"Path to kubeconfig file. Uses default kubeconfig if not specified." predictor:"file"`
@@ -682,6 +688,55 @@ func (c *Cmd) Run(k *kong.Context, _ logging.Logger) error {
 
 		// In strict mode, treat warnings as errors
 		if c.StrictMode && deletionResult.HasWarnings() {
+			hasErrors = true
+		}
+	}
+
+	// 5. Tag Validation
+	if !c.SkipCompositionChecks && c.ValidateTags {
+		// Create tag validator config
+		tagConfig := TagValidatorConfig{
+			RequiredTags:     c.RequiredTags,
+			SkipCompositions: c.SkipTagCompositions,
+		}
+
+		// Create and run tag validator
+		tagValidator := NewTagValidator(tagConfig)
+		tagResult := tagValidator.Validate(extensions)
+
+		// Print results
+		if err := PrintTagValidationResults(tagResult, k.Stdout, c.ShowTagAnalysis); err != nil {
+			return errors.Wrapf(err, "cannot print tag validation results")
+		}
+
+		// Show tag analysis tree if requested
+		if c.ShowTagAnalysis {
+			// Find root compositions (those that create PlatformStampV2 or similar)
+			for _, ext := range extensions {
+				if ext.GetKind() != "Composition" {
+					continue
+				}
+				compositeType, _, _ := unstructured.NestedString(ext.Object, "spec", "compositeTypeRef", "kind")
+				if compositeType == "PlatformStampV2" || compositeType == "TenantV2" {
+					tree := tagValidator.BuildTagPropagationTree(extensions, compositeType)
+					if tree != nil {
+						fmt.Fprintf(k.Stdout, "\n🏷️  Tag Propagation Tree (%s):\n", compositeType)
+						fmt.Fprintf(k.Stdout, "%s\n", tagValidator.PrintTagPropagationTree(tree, "", false))
+					}
+				}
+			}
+		}
+
+		// Check for errors - tag issues are warnings by default
+		if tagResult.MissingTagManager > 0 {
+			// Missing tag-manager is more serious
+			if c.StrictMode {
+				hasErrors = true
+			}
+		}
+
+		// In strict mode, treat all tag warnings as errors
+		if c.StrictMode && len(tagResult.Warnings) > 0 {
 			hasErrors = true
 		}
 	}
