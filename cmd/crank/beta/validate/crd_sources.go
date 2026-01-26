@@ -261,6 +261,9 @@ var KindToDefaultAPIVersion = map[string]string{
 	"StorageClass": "storage.k8s.io/v1",
 	// Policy types
 	"PodDisruptionBudget": "policy/v1",
+	// Admission registration types
+	"ValidatingAdmissionPolicy":        "admissionregistration.k8s.io/v1",
+	"ValidatingAdmissionPolicyBinding": "admissionregistration.k8s.io/v1",
 	// Scheduling types
 	"PriorityClass": "scheduling.k8s.io/v1",
 	// Autoscaling types
@@ -304,6 +307,8 @@ var CoreK8sTypes = map[string]struct {
 	"scheduling.k8s.io/v1, Kind=PriorityClass":                                 {Group: "scheduling.k8s.io", Version: "v1", Kind: "PriorityClass"},
 	"admissionregistration.k8s.io/v1, Kind=MutatingWebhookConfiguration":       {Group: "admissionregistration.k8s.io", Version: "v1", Kind: "MutatingWebhookConfiguration"},
 	"admissionregistration.k8s.io/v1, Kind=ValidatingWebhookConfiguration":     {Group: "admissionregistration.k8s.io", Version: "v1", Kind: "ValidatingWebhookConfiguration"},
+	"admissionregistration.k8s.io/v1, Kind=ValidatingAdmissionPolicy":          {Group: "admissionregistration.k8s.io", Version: "v1", Kind: "ValidatingAdmissionPolicy"},
+	"admissionregistration.k8s.io/v1, Kind=ValidatingAdmissionPolicyBinding":   {Group: "admissionregistration.k8s.io", Version: "v1", Kind: "ValidatingAdmissionPolicyBinding"},
 	"networking.k8s.io/v1, Kind=Ingress":                                       {Group: "networking.k8s.io", Version: "v1", Kind: "Ingress"},
 	"networking.k8s.io/v1, Kind=NetworkPolicy":                                 {Group: "networking.k8s.io", Version: "v1", Kind: "NetworkPolicy"},
 	"networking.k8s.io/v1, Kind=IngressClass":                                  {Group: "networking.k8s.io", Version: "v1", Kind: "IngressClass"},
