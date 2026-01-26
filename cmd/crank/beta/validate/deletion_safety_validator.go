@@ -543,40 +543,289 @@ type KnownDeletionDependency struct {
 	MustHaveUsage    bool   // Whether a Usage is required (vs optional)
 }
 
-// knownDeletionDependencies defines known cross-composition deletion dependencies.
-var knownDeletionDependencies = []KnownDeletionDependency{
-	{
-		ProtectedKind:  "StampNetworkingV2",
-		ProtectedGroup: "cloud.physicsx.ai",
-		ProtectorKind:  "StampLoadBalancerV2",
-		ProtectorGroup: "cloud.physicsx.ai",
-		Reason:         "LoadBalancer Controller creates security groups in VPC that must be cleaned up before VPC deletion",
-		MustHaveUsage:  true,
-	},
-	{
-		ProtectedKind:  "StampLoadBalancerV2",
-		ProtectedGroup: "cloud.physicsx.ai",
-		ProtectorKind:  "StampIstioV2",
-		ProtectorGroup: "cloud.physicsx.ai",
-		Reason:         "Istio creates LoadBalancer Services that LoadBalancer Controller must clean up",
-		MustHaveUsage:  true,
-	},
-	{
-		ProtectedKind:  "StampClusterV2",
-		ProtectedGroup: "cloud.physicsx.ai",
-		ProtectorKind:  "StampCommonV2",
-		ProtectorGroup: "cloud.physicsx.ai",
-		Reason:         "All services run on the cluster and must be deleted before cluster",
-		MustHaveUsage:  true,
-	},
-	{
-		ProtectedKind:  "StampNetworkingV2",
-		ProtectedGroup: "cloud.physicsx.ai",
-		ProtectorKind:  "StampClusterV2",
-		ProtectorGroup: "cloud.physicsx.ai",
-		Reason:         "Cluster uses VPC resources that must outlive the cluster",
-		MustHaveUsage:  true,
-	},
+// DeletionGraphNode represents a node in the composition hierarchy graph for deletion analysis.
+type DeletionGraphNode struct {
+	Kind       string
+	APIGroup   string
+	Children   []string // Child composition kinds this creates
+	Parent     string   // Parent composition kind that creates this
+	IsInfra    bool     // Is this infrastructure (cluster, networking)?
+	IsService  bool     // Is this a service that runs on infrastructure?
+	SourceFile string
+}
+
+// infrastructurePatterns identifies infrastructure composition kinds.
+var infrastructurePatterns = []string{
+	"Cluster", "Networking", "Network", "VPC", "Subnet",
+}
+
+// serviceIndicatorPatterns identifies compositions that are services running on infrastructure.
+var serviceIndicatorPatterns = []string{
+	"Istio", "ArgoCD", "Vault", "Karpenter", "Temporal", "Velero",
+	"ExternalDNS", "CertManager", "ExternalSecrets", "Keda", "Nats",
+	"Crossplane", "ArgoWorkflows", "Observability", "JuiceFS", "PxOperator",
+	"LoadBalancer", "ArgocdConfig",
+}
+
+// buildDeletionGraph dynamically builds the composition hierarchy graph for deletion analysis.
+func (v *DeletionSafetyValidator) buildDeletionGraph() map[string]*DeletionGraphNode {
+	graph := make(map[string]*DeletionGraphNode)
+
+	// First pass: create nodes for all compositions
+	for _, comp := range v.compositions {
+		kind := comp.CompositeTypeRef.Kind
+		apiGroup := comp.CompositeTypeRef.Group
+
+		if _, exists := graph[kind]; !exists {
+			graph[kind] = &DeletionGraphNode{
+				Kind:       kind,
+				APIGroup:   apiGroup,
+				Children:   make([]string, 0),
+				IsInfra:    isInfrastructureKind(kind),
+				IsService:  isServiceKind(kind),
+				SourceFile: comp.SourceFile,
+			}
+		}
+	}
+
+	// Second pass: build parent-child relationships
+	for _, comp := range v.compositions {
+		parentKind := comp.CompositeTypeRef.Kind
+
+		for _, res := range comp.Resources {
+			if res.Base == nil {
+				continue
+			}
+
+			childKind := res.Base.GetKind()
+			childAPIVersion := res.Base.GetAPIVersion()
+			childGroup := extractGroup(childAPIVersion)
+
+			// Skip non-composite resources (Helm releases, K8s objects, cloud resources)
+			if !isCompositeKind(childKind, childGroup) {
+				continue
+			}
+
+			// Add child to parent's children list
+			if parentNode, exists := graph[parentKind]; exists {
+				if !sliceContainsString(parentNode.Children, childKind) {
+					parentNode.Children = append(parentNode.Children, childKind)
+				}
+			}
+
+			// Set parent on child node (create if doesn't exist)
+			if _, exists := graph[childKind]; !exists {
+				graph[childKind] = &DeletionGraphNode{
+					Kind:      childKind,
+					APIGroup:  childGroup,
+					Children:  make([]string, 0),
+					IsInfra:   isInfrastructureKind(childKind),
+					IsService: isServiceKind(childKind),
+				}
+			}
+			graph[childKind].Parent = parentKind
+		}
+	}
+
+	return graph
+}
+
+// detectDependenciesFromGraph dynamically detects deletion dependencies from the composition graph.
+// The key insight is understanding the resource dependency chain:
+//   - Services run ON the Cluster (services should protect cluster)
+//   - Cluster runs IN the VPC/Networking (cluster should protect networking)
+//   - LoadBalancer creates resources IN the VPC (LB should protect networking)
+//   - Istio creates LoadBalancer Services (Istio should protect LB)
+//
+// So the protection chain is: Networking <- Cluster <- Services
+// NOT: Networking <- Services (services don't directly use networking)
+func (v *DeletionSafetyValidator) detectDependenciesFromGraph() []KnownDeletionDependency {
+	var deps []KnownDeletionDependency
+	graph := v.buildDeletionGraph()
+
+	// Find Cluster infrastructure and its sibling services
+	// Services should protect the CLUSTER (not other infrastructure like networking)
+	for _, node := range graph {
+		// Only check Cluster infrastructure (not Networking)
+		if !strings.Contains(node.Kind, "Cluster") {
+			continue
+		}
+
+		// Find siblings (other children of the same parent)
+		if node.Parent == "" {
+			continue
+		}
+
+		parentNode, exists := graph[node.Parent]
+		if !exists {
+			continue
+		}
+
+		// For each cluster, find services that should protect it
+		for _, siblingKind := range parentNode.Children {
+			siblingNode, exists := graph[siblingKind]
+			if !exists {
+				continue
+			}
+
+			// Services should protect the cluster (they run ON it)
+			if siblingNode.IsService && siblingKind != node.Kind {
+				deps = append(deps, KnownDeletionDependency{
+					ProtectedKind:  node.Kind,
+					ProtectedGroup: node.APIGroup,
+					ProtectorKind:  siblingKind,
+					ProtectorGroup: siblingNode.APIGroup,
+					Reason:         fmt.Sprintf("%s runs on %s and must be deleted first", siblingKind, node.Kind),
+					MustHaveUsage:  true,
+				})
+			}
+		}
+	}
+
+	// Networking should be protected by Cluster (cluster runs IN the VPC)
+	for _, node := range graph {
+		if !strings.Contains(node.Kind, "Networking") && !strings.Contains(node.Kind, "Network") {
+			continue
+		}
+
+		// Find cluster siblings
+		if node.Parent == "" {
+			continue
+		}
+		parentNode, exists := graph[node.Parent]
+		if !exists {
+			continue
+		}
+
+		for _, siblingKind := range parentNode.Children {
+			if strings.Contains(siblingKind, "Cluster") {
+				siblingNode := graph[siblingKind]
+				deps = append(deps, KnownDeletionDependency{
+					ProtectedKind:  node.Kind,
+					ProtectedGroup: node.APIGroup,
+					ProtectorKind:  siblingKind,
+					ProtectorGroup: siblingNode.APIGroup,
+					Reason:         "Cluster uses VPC/network resources that must outlive the cluster",
+					MustHaveUsage:  true,
+				})
+			}
+		}
+	}
+
+	// LoadBalancer creates resources in VPC, should protect networking
+	for _, node := range graph {
+		if !strings.Contains(node.Kind, "LoadBalancer") {
+			continue
+		}
+
+		// Find networking siblings
+		if node.Parent == "" {
+			continue
+		}
+		parentNode, exists := graph[node.Parent]
+		if !exists {
+			continue
+		}
+
+		for _, siblingKind := range parentNode.Children {
+			if strings.Contains(siblingKind, "Networking") || strings.Contains(siblingKind, "Network") {
+				siblingNode := graph[siblingKind]
+				deps = append(deps, KnownDeletionDependency{
+					ProtectedKind:  siblingKind,
+					ProtectedGroup: siblingNode.APIGroup,
+					ProtectorKind:  node.Kind,
+					ProtectorGroup: node.APIGroup,
+					Reason:         "LoadBalancer Controller creates security groups in VPC that must be cleaned up",
+					MustHaveUsage:  true,
+				})
+			}
+		}
+	}
+
+	// Istio creates LoadBalancer Services, should protect LoadBalancer
+	for _, node := range graph {
+		if !strings.Contains(node.Kind, "Istio") {
+			continue
+		}
+
+		// Find loadbalancer siblings
+		if node.Parent == "" {
+			continue
+		}
+		parentNode, exists := graph[node.Parent]
+		if !exists {
+			continue
+		}
+
+		for _, siblingKind := range parentNode.Children {
+			if strings.Contains(siblingKind, "LoadBalancer") {
+				siblingNode := graph[siblingKind]
+				deps = append(deps, KnownDeletionDependency{
+					ProtectedKind:  siblingKind,
+					ProtectedGroup: siblingNode.APIGroup,
+					ProtectorKind:  node.Kind,
+					ProtectorGroup: node.APIGroup,
+					Reason:         "Istio creates LoadBalancer Services that must be cleaned up",
+					MustHaveUsage:  true,
+				})
+			}
+		}
+	}
+
+	return deps
+}
+
+// isInfrastructureKind checks if a kind represents infrastructure.
+func isInfrastructureKind(kind string) bool {
+	for _, pattern := range infrastructurePatterns {
+		if strings.Contains(kind, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// isServiceKind checks if a kind represents a service running on infrastructure.
+func isServiceKind(kind string) bool {
+	for _, pattern := range serviceIndicatorPatterns {
+		if strings.Contains(kind, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// isCompositeKind checks if a kind is likely a composite resource (not a cloud/K8s resource).
+func isCompositeKind(kind, apiGroup string) bool {
+	// Composite resources typically have custom API groups
+	if strings.Contains(apiGroup, "crossplane.io") {
+		return false // Crossplane internal resources
+	}
+	if strings.Contains(apiGroup, "upbound.io") {
+		return false // Cloud provider resources
+	}
+	if strings.Contains(apiGroup, "aws.") || strings.Contains(apiGroup, "azure.") || strings.Contains(apiGroup, "gcp.") {
+		return false // Cloud resources
+	}
+	if apiGroup == "kubernetes.crossplane.io" || apiGroup == "helm.crossplane.io" {
+		return false // K8s/Helm provider resources
+	}
+	if apiGroup == "" || apiGroup == "v1" || strings.HasPrefix(apiGroup, "apps/") {
+		return false // Core K8s resources
+	}
+
+	// Likely a composite resource if it has a custom API group
+	return true
+}
+
+// sliceContainsString checks if a slice contains a string.
+func sliceContainsString(slice []string, s string) bool {
+	for _, item := range slice {
+		if item == s {
+			return true
+		}
+	}
+	return false
 }
 
 // extractGroup extracts the API group from an apiVersion string (e.g., "cloud.physicsx.ai/v1alpha1" -> "cloud.physicsx.ai")
@@ -589,11 +838,12 @@ func extractGroup(apiVersion string) string {
 }
 
 // validateCrossCompositionDependencies checks for missing cross-composition Usage objects.
+// It dynamically detects dependencies from the composition graph instead of using hardcoded rules.
 func (v *DeletionSafetyValidator) validateCrossCompositionDependencies() []DeletionSafetyIssue {
 	var issues []DeletionSafetyIssue
 
 	// Build a set of existing Usage relationships
-	// Use Kind/Group (not Kind/APIVersion) to match against known dependencies
+	// Use Kind/Group (not Kind/APIVersion) to match against detected dependencies
 	existingUsages := make(map[string]bool)
 	for _, usage := range v.usages {
 		// Extract group from apiVersion (e.g., "cloud.physicsx.ai/v1alpha1" -> "cloud.physicsx.ai")
@@ -603,8 +853,22 @@ func (v *DeletionSafetyValidator) validateCrossCompositionDependencies() []Delet
 		existingUsages[key] = true
 	}
 
-	// Check for known dependencies
-	for _, dep := range knownDeletionDependencies {
+	// Dynamically detect dependencies from composition graph
+	detectedDeps := v.detectDependenciesFromGraph()
+
+	// Deduplicate dependencies (same protected/protector pair)
+	seenDeps := make(map[string]bool)
+	var uniqueDeps []KnownDeletionDependency
+	for _, dep := range detectedDeps {
+		key := fmt.Sprintf("%s->%s", dep.ProtectedKind, dep.ProtectorKind)
+		if !seenDeps[key] {
+			seenDeps[key] = true
+			uniqueDeps = append(uniqueDeps, dep)
+		}
+	}
+
+	// Check for detected dependencies that are missing ClusterUsage
+	for _, dep := range uniqueDeps {
 		key := fmt.Sprintf("%s/%s->%s/%s", dep.ProtectedKind, dep.ProtectedGroup, dep.ProtectorKind, dep.ProtectorGroup)
 
 		// Check if both kinds exist in our compositions
@@ -612,14 +876,9 @@ func (v *DeletionSafetyValidator) validateCrossCompositionDependencies() []Delet
 		hasProtector := v.hasResourceKind(dep.ProtectorKind)
 
 		if hasProtected && hasProtector && !existingUsages[key] {
-			severity := "warning"
-			if dep.MustHaveUsage {
-				severity = "warning" // Still warning since we can't be 100% sure
-			}
-
 			issues = append(issues, DeletionSafetyIssue{
 				Message:  fmt.Sprintf("Missing ClusterUsage: %s should be protected by %s. %s", dep.ProtectedKind, dep.ProtectorKind, dep.Reason),
-				Severity: severity,
+				Severity: "warning",
 				Category: "crossComposition",
 				Suggestion: fmt.Sprintf("Add ClusterUsage with 'of: %s' and 'by: %s' with replayDeletion: true",
 					dep.ProtectedKind, dep.ProtectorKind),
@@ -628,6 +887,69 @@ func (v *DeletionSafetyValidator) validateCrossCompositionDependencies() []Delet
 	}
 
 	return issues
+}
+
+// PrintCompositionGraph prints the detected composition hierarchy for debugging.
+func (v *DeletionSafetyValidator) PrintCompositionGraph(w io.Writer) {
+	graph := v.buildDeletionGraph()
+
+	fmt.Fprintln(w, "\n=== Composition Hierarchy Graph ===")
+
+	// Find root nodes (no parent)
+	var roots []string
+	for kind, node := range graph {
+		if node.Parent == "" {
+			roots = append(roots, kind)
+		}
+	}
+	sort.Strings(roots)
+
+	// Print tree from each root
+	for _, root := range roots {
+		v.printDeletionNode(w, graph, root, 0, make(map[string]bool))
+	}
+
+	// Print detected dependencies
+	deps := v.detectDependenciesFromGraph()
+
+	// Deduplicate
+	seenDeps := make(map[string]bool)
+	fmt.Fprintln(w, "\n=== Detected Deletion Dependencies ===")
+	for _, dep := range deps {
+		key := fmt.Sprintf("%s->%s", dep.ProtectedKind, dep.ProtectorKind)
+		if !seenDeps[key] {
+			seenDeps[key] = true
+			fmt.Fprintf(w, "  %s ← protected by ← %s\n", dep.ProtectedKind, dep.ProtectorKind)
+		}
+	}
+}
+
+// printDeletionNode recursively prints a node and its children.
+func (v *DeletionSafetyValidator) printDeletionNode(w io.Writer, graph map[string]*DeletionGraphNode, kind string, depth int, visited map[string]bool) {
+	if visited[kind] {
+		return
+	}
+	visited[kind] = true
+
+	node, exists := graph[kind]
+	if !exists {
+		return
+	}
+
+	indent := strings.Repeat("  ", depth)
+	typeLabel := ""
+	if node.IsInfra {
+		typeLabel = " [INFRA]"
+	} else if node.IsService {
+		typeLabel = " [SERVICE]"
+	}
+
+	fmt.Fprintf(w, "%s├── %s%s\n", indent, kind, typeLabel)
+
+	sort.Strings(node.Children)
+	for _, child := range node.Children {
+		v.printDeletionNode(w, graph, child, depth+1, visited)
+	}
 }
 
 // hasResourceKind checks if any composition has a resource of the given kind.

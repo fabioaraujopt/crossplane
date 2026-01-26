@@ -592,123 +592,165 @@ func TestCrossCompositionDependencies(t *testing.T) {
 		wantMessage string
 	}{
 		{
-			name: "Missing cross-composition dependency",
+			name: "Missing cross-composition dependency - service should protect cluster",
 			validator: &DeletionSafetyValidator{
+				// Parent composition (StampCommonV2) creates both Cluster and Service children
 				compositions: []*ParsedComposition{
 					{
-						Name: "networking",
+						Name: "stampcommon-v2",
+						CompositeTypeRef: schema.GroupVersionKind{
+							Group:   "cloud.physicsx.ai",
+							Version: "v1alpha1",
+							Kind:    "StampCommonV2",
+						},
 						Resources: []ComposedResource{
 							{
-								Name: "networking",
+								Name: "cluster",
 								Base: &unstructured.Unstructured{
 									Object: map[string]interface{}{
 										"apiVersion": "cloud.physicsx.ai/v1alpha1",
-										"kind":       "StampNetworkingV2",
+										"kind":       "StampClusterV2",
+									},
+								},
+							},
+							{
+								Name: "istio",
+								Base: &unstructured.Unstructured{
+									Object: map[string]interface{}{
+										"apiVersion": "cloud.physicsx.ai/v1alpha1",
+										"kind":       "StampIstioV2",
 									},
 								},
 							},
 						},
 					},
 					{
-						Name: "loadbalancer",
-						Resources: []ComposedResource{
-							{
-								Name: "loadbalancer",
-								Base: &unstructured.Unstructured{
-									Object: map[string]interface{}{
-										"apiVersion": "cloud.physicsx.ai/v1alpha1",
-										"kind":       "StampLoadBalancerV2",
-									},
-								},
-							},
+						Name: "stampcluster-v2",
+						CompositeTypeRef: schema.GroupVersionKind{
+							Group:   "cloud.physicsx.ai",
+							Version: "v1alpha1",
+							Kind:    "StampClusterV2",
 						},
+						Resources: []ComposedResource{},
+					},
+					{
+						Name: "stampistio-v2",
+						CompositeTypeRef: schema.GroupVersionKind{
+							Group:   "cloud.physicsx.ai",
+							Version: "v1alpha1",
+							Kind:    "StampIstioV2",
+						},
+						Resources: []ComposedResource{},
 					},
 				},
 				allResources: []ResourceInfo{
-					{Name: "networking", Kind: "StampNetworkingV2"},
-					{Name: "loadbalancer", Kind: "StampLoadBalancerV2"},
+					{Name: "cluster", Kind: "StampClusterV2"},
+					{Name: "istio", Kind: "StampIstioV2"},
 				},
-				usages: []UsageInfo{}, // No usages defined
+				usages: []UsageInfo{}, // No usages defined - should warn
 			},
-			wantIssues:  1,
-			wantMessage: "StampNetworkingV2",
+			wantIssues:  1, // Service (Istio) should protect Cluster
+			wantMessage: "StampClusterV2",
 		},
 		{
 			name: "Cross-composition dependency exists - no warning",
 			validator: &DeletionSafetyValidator{
 				compositions: []*ParsedComposition{
 					{
-						Name: "networking",
+						Name: "stampcommon-v2",
+						CompositeTypeRef: schema.GroupVersionKind{
+							Group:   "cloud.physicsx.ai",
+							Version: "v1alpha1",
+							Kind:    "StampCommonV2",
+						},
 						Resources: []ComposedResource{
 							{
-								Name: "networking",
+								Name: "cluster",
 								Base: &unstructured.Unstructured{
 									Object: map[string]interface{}{
 										"apiVersion": "cloud.physicsx.ai/v1alpha1",
-										"kind":       "StampNetworkingV2",
+										"kind":       "StampClusterV2",
+									},
+								},
+							},
+							{
+								Name: "istio",
+								Base: &unstructured.Unstructured{
+									Object: map[string]interface{}{
+										"apiVersion": "cloud.physicsx.ai/v1alpha1",
+										"kind":       "StampIstioV2",
 									},
 								},
 							},
 						},
 					},
 					{
-						Name: "loadbalancer",
-						Resources: []ComposedResource{
-							{
-								Name: "loadbalancer",
-								Base: &unstructured.Unstructured{
-									Object: map[string]interface{}{
-										"apiVersion": "cloud.physicsx.ai/v1alpha1",
-										"kind":       "StampLoadBalancerV2",
-									},
-								},
-							},
+						Name: "stampcluster-v2",
+						CompositeTypeRef: schema.GroupVersionKind{
+							Group:   "cloud.physicsx.ai",
+							Version: "v1alpha1",
+							Kind:    "StampClusterV2",
 						},
+						Resources: []ComposedResource{},
+					},
+					{
+						Name: "stampistio-v2",
+						CompositeTypeRef: schema.GroupVersionKind{
+							Group:   "cloud.physicsx.ai",
+							Version: "v1alpha1",
+							Kind:    "StampIstioV2",
+						},
+						Resources: []ComposedResource{},
 					},
 				},
 				allResources: []ResourceInfo{
-					{Name: "networking", Kind: "StampNetworkingV2"},
-					{Name: "loadbalancer", Kind: "StampLoadBalancerV2"},
+					{Name: "cluster", Kind: "StampClusterV2"},
+					{Name: "istio", Kind: "StampIstioV2"},
 				},
 				usages: []UsageInfo{
 					{
-						Name:           "usage-networking-by-lb",
-						OfKind:         "StampNetworkingV2",
-						OfAPIVersion:   "cloud.physicsx.ai",
-						ByKind:         "StampLoadBalancerV2",
-						ByAPIVersion:   "cloud.physicsx.ai",
+						Name:           "usage-cluster-by-istio",
+						OfKind:         "StampClusterV2",
+						OfAPIVersion:   "cloud.physicsx.ai/v1alpha1",
+						ByKind:         "StampIstioV2",
+						ByAPIVersion:   "cloud.physicsx.ai/v1alpha1",
 						ReplayDeletion: true,
 					},
 				},
 			},
-			wantIssues: 0,
+			wantIssues: 0, // Usage exists, no warning
 		},
 		{
-			name: "Only one resource present - no warning",
+			name: "No parent-child relationship - no warning",
 			validator: &DeletionSafetyValidator{
+				// Flat compositions with no parent creating children
 				compositions: []*ParsedComposition{
 					{
-						Name: "networking",
-						Resources: []ComposedResource{
-							{
-								Name: "networking",
-								Base: &unstructured.Unstructured{
-									Object: map[string]interface{}{
-										"apiVersion": "cloud.physicsx.ai/v1alpha1",
-										"kind":       "StampNetworkingV2",
-									},
-								},
-							},
+						Name: "stampcluster-v2",
+						CompositeTypeRef: schema.GroupVersionKind{
+							Group:   "cloud.physicsx.ai",
+							Version: "v1alpha1",
+							Kind:    "StampClusterV2",
 						},
+						Resources: []ComposedResource{},
+					},
+					{
+						Name: "stampistio-v2",
+						CompositeTypeRef: schema.GroupVersionKind{
+							Group:   "cloud.physicsx.ai",
+							Version: "v1alpha1",
+							Kind:    "StampIstioV2",
+						},
+						Resources: []ComposedResource{},
 					},
 				},
 				allResources: []ResourceInfo{
-					{Name: "networking", Kind: "StampNetworkingV2"},
-					// No StampLoadBalancerV2
+					{Name: "cluster", Kind: "StampClusterV2"},
+					{Name: "istio", Kind: "StampIstioV2"},
 				},
 				usages: []UsageInfo{},
 			},
-			wantIssues: 0,
+			wantIssues: 0, // No parent-child relationship detected, no warning
 		},
 	}
 
