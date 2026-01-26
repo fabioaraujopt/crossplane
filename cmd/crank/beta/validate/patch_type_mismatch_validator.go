@@ -201,20 +201,29 @@ func (v *PatchTypeMismatchValidator) getFieldType(schema *extv1.JSONSchemaProps,
 			return ""
 		}
 
-		// Handle array indexing like "items[0]"
+		// Handle array/map indexing like "items[0]" or "matchLabels["key"]"
 		cleanPart := part
+		hasBracket := false
 		if idx := strings.Index(part, "["); idx != -1 {
 			cleanPart = part[:idx]
+			hasBracket = true
 		}
 
 		// Check properties
 		if current.Properties != nil {
 			if prop, ok := current.Properties[cleanPart]; ok {
 				current = &prop
-				
-				// If we accessed an array element, dive into items
-				if strings.Contains(part, "[") && current.Items != nil && current.Items.Schema != nil {
-					current = current.Items.Schema
+
+				// If we accessed with bracket notation, determine if it's array or map
+				if hasBracket {
+					// Check if it's a map (has additionalProperties) - common for labels/annotations
+					if current.AdditionalProperties != nil && current.AdditionalProperties.Schema != nil {
+						current = current.AdditionalProperties.Schema
+					} else if current.Items != nil && current.Items.Schema != nil {
+						// It's an array - dive into items
+						current = current.Items.Schema
+					}
+					// If neither, current stays as the property type (might be x-kubernetes-preserve-unknown-fields)
 				}
 				continue
 			}
