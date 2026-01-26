@@ -128,8 +128,9 @@ func (v *TagValidator) Validate(compositions []*unstructured.Unstructured) TagVa
 		CompositionsChecked: len(compositions),
 	}
 
-	// Build a map of compositions by their composite type
-	compositionMap := make(map[string]*unstructured.Unstructured)
+	// Build a MULTI-map of compositions by their composite type
+	// This handles AWS/Azure variants of the same composition kind
+	compositionMultiMap := make(map[string][]*unstructured.Unstructured)
 	for _, comp := range compositions {
 		if comp == nil || comp.GetKind() != "Composition" {
 			continue
@@ -138,9 +139,13 @@ func (v *TagValidator) Validate(compositions []*unstructured.Unstructured) TagVa
 		// Get composite type ref
 		compositeType := v.getCompositeTypeRef(comp)
 		if compositeType != "" {
-			compositionMap[compositeType] = comp
+			compositionMultiMap[compositeType] = append(compositionMultiMap[compositeType], comp)
 		}
 	}
+
+	// Track which compositions we've already warned about (by kind)
+	// to avoid duplicate warnings for AWS/Azure variants
+	warnedMissingTagManager := make(map[string]bool)
 
 	for _, comp := range compositions {
 		if comp == nil || comp.GetKind() != "Composition" {
@@ -154,6 +159,7 @@ func (v *TagValidator) Validate(compositions []*unstructured.Unstructured) TagVa
 		}
 
 		sourceFile := v.getSourceFile(comp)
+		compositeType := v.getCompositeTypeRef(comp)
 
 		// Rule 1: Check if composition creates cloud resources
 		cloudResources := v.getCloudResources(comp)
@@ -162,15 +168,19 @@ func (v *TagValidator) Validate(compositions []*unstructured.Unstructured) TagVa
 
 			// Check for tag-manager
 			if !v.hasTagManager(comp) {
-				result.MissingTagManager++
-				result.Warnings = append(result.Warnings, TagWarning{
-					File:        sourceFile,
-					Composition: compName,
-					Rule:        "missing-tag-manager",
-					Message:     "Composition creates cloud resources without function-tag-manager",
-					Affected:    cloudResources,
-					Action:      "Add function-tag-manager to pipeline",
-				})
+				// Only warn once per composite type (avoid duplicate warnings for AWS/Azure)
+				if !warnedMissingTagManager[compositeType] {
+					result.MissingTagManager++
+					result.Warnings = append(result.Warnings, TagWarning{
+						File:        sourceFile,
+						Composition: compName,
+						Rule:        "missing-tag-manager",
+						Message:     "Composition creates cloud resources without function-tag-manager",
+						Affected:    cloudResources,
+						Action:      "Add function-tag-manager to pipeline",
+					})
+					warnedMissingTagManager[compositeType] = true
+				}
 			} else {
 				// Rule 2: Check required tags in tag-manager
 				missingTags := v.getMissingRequiredTags(comp)
@@ -189,18 +199,23 @@ func (v *TagValidator) Validate(compositions []*unstructured.Unstructured) TagVa
 		// Rule 3: Check tag propagation to child compositions
 		childComps := v.getChildCompositions(comp)
 		for _, child := range childComps {
-			// Check if child expects tags (uses FromCompositeFieldPath for tags)
-			childComp, exists := compositionMap[child.Kind]
-			if exists && v.compositionExpectsTags(childComp) {
-				if !v.parentPassesTags(comp, child.Name) {
-					result.MissingPropagation++
-					result.Warnings = append(result.Warnings, TagWarning{
-						File:        sourceFile,
-						Composition: compName,
-						Rule:        "tags-not-propagated",
-						Message:     fmt.Sprintf("Child '%s' expects tags but parent doesn't propagate them", child.Kind),
-						Action:      "Add patch: fromFieldPath: spec.parameters.tags → toFieldPath: spec.parameters.tags",
-					})
+			// Check if ANY variant of the child expects tags
+			childVariants, exists := compositionMultiMap[child.Kind]
+			if exists {
+				for _, childComp := range childVariants {
+					if v.compositionExpectsTags(childComp) {
+						if !v.parentPassesTags(comp, child.Name) {
+							result.MissingPropagation++
+							result.Warnings = append(result.Warnings, TagWarning{
+								File:        sourceFile,
+								Composition: compName,
+								Rule:        "tags-not-propagated",
+								Message:     fmt.Sprintf("Child '%s' expects tags but parent doesn't propagate them", child.Kind),
+								Action:      "Add patch: fromFieldPath: spec.parameters.tags → toFieldPath: spec.parameters.tags",
+							})
+						}
+						break // Only warn once per child
+					}
 				}
 			}
 		}
@@ -217,53 +232,112 @@ func (v *TagValidator) Validate(compositions []*unstructured.Unstructured) TagVa
 
 // BuildTagPropagationTree builds a tree showing tag propagation through compositions
 func (v *TagValidator) BuildTagPropagationTree(compositions []*unstructured.Unstructured, rootKind string) *TagPropagationNode {
-	// Build a map of compositions by their composite type
-	compositionMap := make(map[string]*unstructured.Unstructured)
+	// Build a MULTI-map of compositions by their composite type
+	// This handles AWS/Azure variants of the same composition kind
+	compositionMultiMap := make(map[string][]*unstructured.Unstructured)
 	for _, comp := range compositions {
 		if comp == nil || comp.GetKind() != "Composition" {
 			continue
 		}
 		compositeType := v.getCompositeTypeRef(comp)
 		if compositeType != "" {
-			compositionMap[compositeType] = comp
+			compositionMultiMap[compositeType] = append(compositionMultiMap[compositeType], comp)
 		}
 	}
 
-	// Find the root composition
-	rootComp, exists := compositionMap[rootKind]
-	if !exists {
+	// Find root compositions (may have multiple variants)
+	rootComps, exists := compositionMultiMap[rootKind]
+	if !exists || len(rootComps) == 0 {
 		return nil
 	}
 
-	return v.buildTreeNode(rootComp, compositionMap, make(map[string]bool))
+	return v.buildTreeNodeFromVariants(rootComps, compositionMultiMap, make(map[string]bool))
 }
 
-func (v *TagValidator) buildTreeNode(comp *unstructured.Unstructured, compositionMap map[string]*unstructured.Unstructured, visited map[string]bool) *TagPropagationNode {
-	compositeType := v.getCompositeTypeRef(comp)
+// buildTreeNodeFromVariants builds a tree node by merging all variants of a composition
+func (v *TagValidator) buildTreeNodeFromVariants(compVariants []*unstructured.Unstructured, compositionMultiMap map[string][]*unstructured.Unstructured, visited map[string]bool) *TagPropagationNode {
+	if len(compVariants) == 0 {
+		return nil
+	}
+
+	// Use first variant for basic info
+	firstComp := compVariants[0]
+	compositeType := v.getCompositeTypeRef(firstComp)
 	if visited[compositeType] {
 		return nil // Prevent cycles
 	}
 	visited[compositeType] = true
 
-	node := &TagPropagationNode{
-		Name:           comp.GetName(),
-		Kind:           compositeType,
-		File:           v.getSourceFile(comp),
-		HasTagManager:  v.hasTagManager(comp),
-		ReceivesTags:   v.compositionExpectsTags(comp),
-		CloudResources: v.getCloudResources(comp),
+	// Merge data from ALL variants
+	hasTagManager := false
+	receivesTags := false
+	var allCloudResources []string
+	var allChildren []ChildComposition
+	childSeen := make(map[string]bool)
+
+	for _, comp := range compVariants {
+		// Merge tag-manager status (any variant having it counts)
+		if v.hasTagManager(comp) {
+			hasTagManager = true
+		}
+
+		// Merge receives tags (any variant expecting tags counts)
+		if v.compositionExpectsTags(comp) {
+			receivesTags = true
+		}
+
+		// Merge cloud resources from all variants
+		cloudResources := v.getCloudResources(comp)
+		for _, cr := range cloudResources {
+			// Avoid duplicates
+			found := false
+			for _, existing := range allCloudResources {
+				if existing == cr {
+					found = true
+					break
+				}
+			}
+			if !found {
+				allCloudResources = append(allCloudResources, cr)
+			}
+		}
+
+		// Merge children from all variants (AWS and Azure may have different children)
+		children := v.getChildCompositions(comp)
+		for _, child := range children {
+			if !childSeen[child.Kind] {
+				childSeen[child.Kind] = true
+				allChildren = append(allChildren, child)
+			}
+		}
 	}
 
-	// Check children
-	childComps := v.getChildCompositions(comp)
-	for _, child := range childComps {
-		node.PassesTags = node.PassesTags || v.parentPassesTags(comp, child.Name)
+	node := &TagPropagationNode{
+		Name:           firstComp.GetName(),
+		Kind:           compositeType,
+		File:           v.getSourceFile(firstComp),
+		HasTagManager:  hasTagManager,
+		ReceivesTags:   receivesTags,
+		CloudResources: allCloudResources,
+	}
 
-		childComp, exists := compositionMap[child.Kind]
+	// Build children (check if ANY parent variant passes tags)
+	for _, child := range allChildren {
+		// Check if any parent variant passes tags to this child
+		passesTags := false
+		for _, comp := range compVariants {
+			if v.parentPassesTags(comp, child.Name) {
+				passesTags = true
+				break
+			}
+		}
+		node.PassesTags = node.PassesTags || passesTags
+
+		childVariants, exists := compositionMultiMap[child.Kind]
 		if exists {
-			childNode := v.buildTreeNode(childComp, compositionMap, visited)
+			childNode := v.buildTreeNodeFromVariants(childVariants, compositionMultiMap, visited)
 			if childNode != nil {
-				childNode.ReceivesTags = v.parentPassesTags(comp, child.Name)
+				childNode.ReceivesTags = passesTags
 				node.Children = append(node.Children, childNode)
 			}
 		}
