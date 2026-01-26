@@ -5,8 +5,74 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 )
+
+// formatPlaceholderRegex matches Go format verbs with optional positional index, flags, width, and precision.
+// Pattern breakdown:
+//   %           - literal percent sign
+//   (?:\[(\d+)\])? - optional positional index like [1], [2], capturing the number
+//   [-+# 0]*    - optional flags (-, +, #, space, 0)
+//   (?:\*|\d+)? - optional width (either * or digits)
+//   (?:\.(?:\*|\d+))? - optional precision (. followed by * or digits)
+//   [vtbcdoOqxXUeEfFgGspT] - the format verb (excludes % which is escape, not a placeholder)
+//
+// Examples matched: %s, %d, %v, %[1]s, %[2]d, %-10s, %5.2f, %#x, %+v
+var formatPlaceholderRegex = regexp.MustCompile(`%(?:\[(\d+)\])?[-+# 0]*(?:\*|\d+)?(?:\.(?:\*|\d+))?[vtbcdoOqxXUeEfFgGspT]`)
+
+// countFormatPlaceholders counts the number of arguments needed by a Go format string.
+// It handles:
+//   - Simple placeholders: %s, %d, %v, etc.
+//   - Positional placeholders: %[1]s, %[2]d, etc. (uses max index as count)
+//   - Mixed: positional + non-positional (accounts for continuation after positional)
+//   - Width/precision with flags: %-10s, %5.2f, %#x
+//
+// Note: %% (escaped percent) is not counted as it doesn't consume an argument.
+func countFormatPlaceholders(format string) int {
+	// First, remove %% escapes (literal percent signs) to avoid false matches
+	// For example: "100%% complete" should have 0 placeholders, not match "% c"
+	cleanFormat := strings.ReplaceAll(format, "%%", "")
+
+	matches := formatPlaceholderRegex.FindAllStringSubmatch(cleanFormat, -1)
+	if len(matches) == 0 {
+		return 0
+	}
+
+	maxPositionalIndex := 0
+	lastPositionalPos := -1
+
+	for i, match := range matches {
+		if len(match) > 1 && match[1] != "" {
+			// Positional argument: %[N]verb - capture group 1 has the number
+			idx := 0
+			for _, c := range match[1] {
+				idx = idx*10 + int(c-'0')
+			}
+			if idx > maxPositionalIndex {
+				maxPositionalIndex = idx
+			}
+			lastPositionalPos = i
+		}
+	}
+
+	if maxPositionalIndex == 0 {
+		// No positional arguments - count all verbs
+		return len(matches)
+	}
+
+	// With positional arguments:
+	// The max index tells us the minimum required arguments
+	// Non-positional verbs after the last positional continue from that index
+	nonPositionalAfterLast := 0
+	for i := lastPositionalPos + 1; i < len(matches); i++ {
+		if len(matches[i]) <= 1 || matches[i][1] == "" {
+			nonPositionalAfterLast++
+		}
+	}
+
+	return maxPositionalIndex + nonPositionalAfterLast
+}
 
 // PatchTypeValidationError represents a patch type validation error.
 type PatchTypeValidationError struct {
@@ -384,7 +450,7 @@ func (v *PatchTypeValidator) validateCombineFromComposite(compName string, patch
 
 	// Validate format string placeholder count matches variable count
 	if patch.Combine.String != nil && patch.Combine.String.Format != "" {
-		placeholderCount := strings.Count(patch.Combine.String.Format, "%s")
+		placeholderCount := countFormatPlaceholders(patch.Combine.String.Format)
 		variableCount := len(patch.Combine.Variables)
 
 		if placeholderCount != variableCount {
@@ -396,7 +462,7 @@ func (v *PatchTypeValidator) validateCombineFromComposite(compName string, patch
 				SourceFile:      patchInfo.SourceFile,
 				SourceLine:      patchInfo.SourceLine,
 				Message: fmt.Sprintf(
-					"composition '%s' resource '%s' patch[%d]: format string has %d placeholder(s) (%%s) but %d variable(s) defined - mismatch will cause runtime error",
+					"composition '%s' resource '%s' patch[%d]: format string has %d placeholder(s) but %d variable(s) defined - mismatch will cause runtime error",
 					compName, patchInfo.ResourceName, patchInfo.PatchIndex, placeholderCount, variableCount),
 				Severity: "error",
 			})

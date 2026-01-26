@@ -1531,7 +1531,7 @@ func convertJSONSchemaToOpenAPIWithResolver(schema map[string]interface{}, resol
 	if depth > maxDepth {
 		// Return a permissive schema for deeply nested types
 		return &extv1.JSONSchemaProps{
-			XPreserveUnknownFields: boolPtr(true),
+			XPreserveUnknownFields: boolPointer(true),
 		}
 	}
 
@@ -1555,7 +1555,7 @@ func convertJSONSchemaToOpenAPIWithResolver(schema map[string]interface{}, resol
 			return convertJSONSchemaToOpenAPIWithResolver(mergedSchema, resolver, depth+1)
 		}
 		// If resolution fails, continue with what we have (allow unknown fields)
-		result.XPreserveUnknownFields = boolPtr(true)
+		result.XPreserveUnknownFields = boolPointer(true)
 	}
 
 	if desc, ok := schema["description"].(string); ok {
@@ -1657,8 +1657,8 @@ func convertJSONSchemaToOpenAPIWithResolver(schema map[string]interface{}, resol
 	return result
 }
 
-// boolPtr returns a pointer to a bool value.
-func boolPtr(b bool) *bool {
+// boolPointer returns a pointer to a bool value.
+func boolPointer(b bool) *bool {
 	return &b
 }
 

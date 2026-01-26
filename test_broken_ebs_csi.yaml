@@ -1,0 +1,90 @@
+---
+# Test case: EBS CSI driver with BROKEN trust policy (5 variables, 4 placeholders)
+apiVersion: apiextensions.crossplane.io/v1
+kind: Composition
+metadata:
+  name: test-ebs-csi-broken
+spec:
+  compositeTypeRef:
+    apiVersion: cloud.physicsx.ai/v1alpha1
+    kind: TestXR
+  mode: Pipeline
+  pipeline:
+    - step: patch-and-transform
+      functionRef:
+        name: function-patch-and-transform
+      input:
+        apiVersion: pt.fn.crossplane.io/v1beta1
+        kind: Resources
+        resources:
+          - name: ebs-csi-driver-role
+            base:
+              apiVersion: iam.aws.upbound.io/v1beta1
+              kind: Role
+            patches:
+              - type: CombineFromComposite
+                combine:
+                  variables:
+                    - fromFieldPath: spec.parameters.aws.accountId
+                    - fromFieldPath: status.oidcIssuerHostname
+                    - fromFieldPath: status.oidcIssuerId           # Variable 3 (EXTRA!)
+                    - fromFieldPath: status.oidcIssuerHostname
+                    - fromFieldPath: status.oidcIssuerId           # Variable 5 (EXTRA!)
+                  strategy: string
+                  string:
+                    fmt: |
+                      {
+                        "Version": "2012-10-17",
+                        "Statement": [
+                          {
+                            "Effect": "Allow",
+                            "Principal": {
+                              "Federated": "arn:aws:iam::%s:oidc-provider/%s"
+                            },
+                            "Action": "sts:AssumeRoleWithWebIdentity",
+                            "Condition": {
+                              "StringEquals": {
+                                "%s:aud": "sts.amazonaws.com",
+                                "%s:sub": "system:serviceaccount:kube-system:ebs-csi-controller-sa"
+                              }
+                            }
+                          }
+                        ]
+                      }
+                toFieldPath: spec.forProvider.assumeRolePolicy
+---
+apiVersion: apiextensions.crossplane.io/v2
+kind: CompositeResourceDefinition
+metadata:
+  name: testxrs.cloud.physicsx.ai
+spec:
+  group: cloud.physicsx.ai
+  names:
+    kind: TestXR
+    plural: testxrs
+  versions:
+    - name: v1alpha1
+      served: true
+      referenceable: true
+      schema:
+        openAPIV3Schema:
+          type: object
+          properties:
+            spec:
+              type: object
+              properties:
+                parameters:
+                  type: object
+                  properties:
+                    aws:
+                      type: object
+                      properties:
+                        accountId:
+                          type: string
+            status:
+              type: object
+              properties:
+                oidcIssuerHostname:
+                  type: string
+                oidcIssuerId:
+                  type: string
