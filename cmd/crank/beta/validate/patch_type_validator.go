@@ -2,6 +2,7 @@
 package validate
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -42,8 +43,9 @@ func (v *PatchTypeValidator) Validate(w io.Writer) (*PatchTypeValidationResult, 
 	result := &PatchTypeValidationResult{}
 
 	for _, comp := range v.compositions {
-		compErrors := v.validateComposition(comp)
+		compErrors, compWarnings := v.validateComposition(comp)
 		result.Errors = append(result.Errors, compErrors...)
+		result.Warnings = append(result.Warnings, compWarnings...)
 	}
 
 	// Print errors
@@ -72,20 +74,23 @@ func (v *PatchTypeValidator) Validate(w io.Writer) (*PatchTypeValidationResult, 
 }
 
 // validateComposition validates all patches in a composition.
-func (v *PatchTypeValidator) validateComposition(comp *ParsedComposition) []PatchTypeValidationError {
+func (v *PatchTypeValidator) validateComposition(comp *ParsedComposition) ([]PatchTypeValidationError, []PatchTypeValidationError) {
 	var errors []PatchTypeValidationError
+	var warnings []PatchTypeValidationError
 
 	for _, patchInfo := range comp.AllPatches {
-		patchErrors := v.validatePatch(comp.Name, patchInfo)
+		patchErrors, patchWarnings := v.validatePatch(comp.Name, patchInfo)
 		errors = append(errors, patchErrors...)
+		warnings = append(warnings, patchWarnings...)
 	}
 
-	return errors
+	return errors, warnings
 }
 
 // validatePatch validates a single patch has required fields for its type.
-func (v *PatchTypeValidator) validatePatch(compName string, patchInfo PatchInfo) []PatchTypeValidationError {
-	var errors []PatchTypeValidationError
+// Returns (errors, warnings) where errors are critical issues and warnings are recommendations.
+func (v *PatchTypeValidator) validatePatch(compName string, patchInfo PatchInfo) ([]PatchTypeValidationError, []PatchTypeValidationError) {
+	var allResults []PatchTypeValidationError
 	patch := patchInfo.Patch
 
 	// Normalize empty type to default
@@ -96,28 +101,38 @@ func (v *PatchTypeValidator) validatePatch(compName string, patchInfo PatchInfo)
 
 	switch patchType {
 	case PatchTypeFromCompositeFieldPath:
-		errors = append(errors, v.validateFromCompositeFieldPath(compName, patchInfo)...)
+		allResults = append(allResults, v.validateFromCompositeFieldPath(compName, patchInfo)...)
 
 	case PatchTypeToCompositeFieldPath:
-		errors = append(errors, v.validateToCompositeFieldPath(compName, patchInfo)...)
+		allResults = append(allResults, v.validateToCompositeFieldPath(compName, patchInfo)...)
 
 	case PatchTypeCombineFromComposite:
-		errors = append(errors, v.validateCombineFromComposite(compName, patchInfo)...)
+		allResults = append(allResults, v.validateCombineFromComposite(compName, patchInfo)...)
 
 	case PatchTypeCombineToComposite:
-		errors = append(errors, v.validateCombineToComposite(compName, patchInfo)...)
+		allResults = append(allResults, v.validateCombineToComposite(compName, patchInfo)...)
 
 	case PatchTypePatchSet:
-		errors = append(errors, v.validatePatchSetRef(compName, patchInfo)...)
+		allResults = append(allResults, v.validatePatchSetRef(compName, patchInfo)...)
 
 	case PatchTypeFromEnvironmentFieldPath:
-		errors = append(errors, v.validateFromEnvironmentFieldPath(compName, patchInfo)...)
+		allResults = append(allResults, v.validateFromEnvironmentFieldPath(compName, patchInfo)...)
 
 	case PatchTypeToEnvironmentFieldPath:
-		errors = append(errors, v.validateToEnvironmentFieldPath(compName, patchInfo)...)
+		allResults = append(allResults, v.validateToEnvironmentFieldPath(compName, patchInfo)...)
 	}
 
-	return errors
+	// Separate errors and warnings based on Severity
+	var errors, warnings []PatchTypeValidationError
+	for _, result := range allResults {
+		if result.Severity == "warning" {
+			warnings = append(warnings, result)
+		} else {
+			errors = append(errors, result)
+		}
+	}
+
+	return errors, warnings
 }
 
 // validateFromCompositeFieldPath validates FromCompositeFieldPath patches.
@@ -139,6 +154,81 @@ func (v *PatchTypeValidator) validateFromCompositeFieldPath(compName string, pat
 				compName, patchInfo.ResourceName, patchInfo.PatchIndex),
 			Severity: "error",
 		})
+	}
+
+	// Validate status dependency has Required policy
+	errors = append(errors, v.validateStatusDependencyPolicy(compName, patchInfo, patch.FromFieldPath)...)
+
+	return errors
+}
+
+// validateStatusDependencyPolicy checks if a patch reading from status.* has Required policy.
+// Status fields are populated by other resources, so the patch should use Required policy
+// to ensure the resource waits for the status to be available.
+// Without Required, resources may be created with empty values, causing runtime failures.
+func (v *PatchTypeValidator) validateStatusDependencyPolicy(compName string, patchInfo PatchInfo, fromFieldPath string) []PatchTypeValidationError {
+	var errors []PatchTypeValidationError
+	patch := patchInfo.Patch
+
+	// Check if reading from status.* fields (dependency on another resource's output)
+	if strings.HasPrefix(fromFieldPath, "status.") {
+		hasRequiredPolicy := patch.Policy != nil && patch.Policy.FromFieldPath == "Required"
+
+		if !hasRequiredPolicy {
+			errors = append(errors, PatchTypeValidationError{
+				CompositionName: compName,
+				ResourceName:    patchInfo.ResourceName,
+				PatchIndex:      patchInfo.PatchIndex,
+				PatchType:       string(patch.Type),
+				SourceFile:      patchInfo.SourceFile,
+				SourceLine:      patchInfo.SourceLine,
+				Message: fmt.Sprintf(
+					"composition '%s' resource '%s' patch[%d]: reading from '%s' (status dependency) requires 'policy.fromFieldPath: Required' - without it, the resource may be created before the status field is populated, causing runtime failures",
+					compName, patchInfo.ResourceName, patchInfo.PatchIndex, fromFieldPath),
+				Severity: "error",
+			})
+		}
+	}
+
+	return errors
+}
+
+// validateCombineStatusDependencies checks if a CombineFromComposite patch reading from status.* has Required policy.
+// Without Required, resources may be created with empty values in format strings, causing runtime failures.
+func (v *PatchTypeValidator) validateCombineStatusDependencies(compName string, patchInfo PatchInfo) []PatchTypeValidationError {
+	var errors []PatchTypeValidationError
+	patch := patchInfo.Patch
+
+	if patch.Combine == nil {
+		return errors
+	}
+
+	// Check if any variable reads from status.* fields
+	var statusVariables []string
+	for _, variable := range patch.Combine.Variables {
+		if strings.HasPrefix(variable.FromFieldPath, "status.") {
+			statusVariables = append(statusVariables, variable.FromFieldPath)
+		}
+	}
+
+	// If there are status dependencies without Required policy, error
+	if len(statusVariables) > 0 {
+		hasRequiredPolicy := patch.Policy != nil && patch.Policy.FromFieldPath == "Required"
+
+		if !hasRequiredPolicy {
+			errors = append(errors, PatchTypeValidationError{
+				CompositionName: compName,
+				ResourceName:    patchInfo.ResourceName,
+				PatchIndex:      patchInfo.PatchIndex,
+				PatchType:       string(patch.Type),
+				SourceFile:      patchInfo.SourceFile,
+				SourceLine:      patchInfo.SourceLine,
+				Message: fmt.Sprintf(
+					"composition '%s' resource '%s' patch[%d]: combine patch reads from status fields %v (status dependency) requires 'policy.fromFieldPath: Required' - without it, the resource may be created before status fields are populated, causing runtime failures",
+					compName, patchInfo.ResourceName, patchInfo.PatchIndex, statusVariables),
+				Severity: "error",
+			})
+		}
 	}
 
 	return errors
@@ -256,6 +346,9 @@ func (v *PatchTypeValidator) validateCombineFromComposite(compName string, patch
 		}
 	}
 
+	// Validate status dependencies in combine variables have Required policy
+	errors = append(errors, v.validateCombineStatusDependencies(compName, patchInfo)...)
+
 	// Required: toFieldPath
 	if patch.ToFieldPath == "" {
 		errors = append(errors, PatchTypeValidationError{
@@ -287,6 +380,45 @@ func (v *PatchTypeValidator) validateCombineFromComposite(compName string, patch
 				compName, patchInfo.ResourceName, patchInfo.PatchIndex, patch.Combine.Strategy),
 			Severity: "error",
 		})
+	}
+
+	// Validate format string placeholder count matches variable count
+	if patch.Combine.String != nil && patch.Combine.String.Format != "" {
+		placeholderCount := strings.Count(patch.Combine.String.Format, "%s")
+		variableCount := len(patch.Combine.Variables)
+
+		if placeholderCount != variableCount {
+			errors = append(errors, PatchTypeValidationError{
+				CompositionName: compName,
+				ResourceName:    patchInfo.ResourceName,
+				PatchIndex:      patchInfo.PatchIndex,
+				PatchType:       string(PatchTypeCombineFromComposite),
+				SourceFile:      patchInfo.SourceFile,
+				SourceLine:      patchInfo.SourceLine,
+				Message: fmt.Sprintf(
+					"composition '%s' resource '%s' patch[%d]: format string has %d placeholder(s) (%%s) but %d variable(s) defined - mismatch will cause runtime error",
+					compName, patchInfo.ResourceName, patchInfo.PatchIndex, placeholderCount, variableCount),
+				Severity: "error",
+			})
+		}
+
+		// Validate JSON template if toFieldPath suggests it should be JSON
+		if isJSONField(patch.ToFieldPath) {
+			if err := validateJSONTemplate(patch.Combine.String.Format, variableCount); err != nil {
+				errors = append(errors, PatchTypeValidationError{
+					CompositionName: compName,
+					ResourceName:    patchInfo.ResourceName,
+					PatchIndex:      patchInfo.PatchIndex,
+					PatchType:       string(PatchTypeCombineFromComposite),
+					SourceFile:      patchInfo.SourceFile,
+					SourceLine:      patchInfo.SourceLine,
+					Message: fmt.Sprintf(
+						"composition '%s' resource '%s' patch[%d]: format string template appears to be invalid JSON: %v",
+						compName, patchInfo.ResourceName, patchInfo.PatchIndex, err),
+					Severity: "warning",
+				})
+			}
+		}
 	}
 
 	return errors
@@ -479,4 +611,30 @@ func contains(slice []string, s string) bool {
 		}
 	}
 	return false
+}
+
+// isJSONField checks if a field path likely contains JSON data.
+func isJSONField(fieldPath string) bool {
+	fieldLower := strings.ToLower(fieldPath)
+	return strings.Contains(fieldLower, "policy") ||
+		strings.Contains(fieldLower, "json") ||
+		strings.Contains(fieldLower, "assumerolepolicy") ||
+		strings.Contains(fieldLower, "document")
+}
+
+// validateJSONTemplate validates that a format string template produces valid JSON.
+func validateJSONTemplate(template string, variableCount int) error {
+	// Replace all %s placeholders with dummy values
+	testStr := template
+	for i := 0; i < variableCount; i++ {
+		testStr = strings.Replace(testStr, "%s", "test-value", 1)
+	}
+
+	// Try to parse as JSON
+	var js interface{}
+	if err := json.Unmarshal([]byte(testStr), &js); err != nil {
+		return err
+	}
+
+	return nil
 }

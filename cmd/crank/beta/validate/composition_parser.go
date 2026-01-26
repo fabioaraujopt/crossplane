@@ -54,20 +54,33 @@ type CombineVariable struct {
 	FromFieldPath string `json:"fromFieldPath"`
 }
 
+// CombineString represents the string configuration in a Combine patch.
+type CombineString struct {
+	Format string `json:"fmt,omitempty"`
+	Type   string `json:"type,omitempty"`
+}
+
 // Combine represents combine configuration in a patch.
 type Combine struct {
 	Variables []CombineVariable `json:"variables,omitempty"`
 	Strategy  string            `json:"strategy,omitempty"`
+	String    *CombineString    `json:"string,omitempty"`
+}
+
+// PatchPolicy represents the policy configuration for a patch.
+type PatchPolicy struct {
+	FromFieldPath string `json:"fromFieldPath,omitempty"` // "Required" or "Optional"
 }
 
 // Patch represents a patch in a composition.
 type Patch struct {
-	Type          PatchType   `json:"type,omitempty"`
-	FromFieldPath string      `json:"fromFieldPath,omitempty"`
-	ToFieldPath   string      `json:"toFieldPath,omitempty"`
-	Combine       *Combine    `json:"combine,omitempty"`
-	PatchSetName  string      `json:"patchSetName,omitempty"` // For PatchSet references
-	Transforms    []Transform `json:"transforms,omitempty"`
+	Type          PatchType    `json:"type,omitempty"`
+	FromFieldPath string       `json:"fromFieldPath,omitempty"`
+	ToFieldPath   string       `json:"toFieldPath,omitempty"`
+	Combine       *Combine     `json:"combine,omitempty"`
+	PatchSetName  string       `json:"patchSetName,omitempty"` // For PatchSet references
+	Transforms    []Transform  `json:"transforms,omitempty"`
+	Policy        *PatchPolicy `json:"policy,omitempty"` // Policy for handling missing fields
 }
 
 // Transform represents a transformation applied to a patch value.
@@ -463,6 +476,14 @@ func (p *CompositionParser) parsePatch(patchMap map[string]interface{}) Patch {
 				}
 			}
 		}
+
+		// Parse string configuration if present
+		if strConfig, ok := combine["string"].(map[string]interface{}); ok {
+			patch.Combine.String = &CombineString{
+				Format: getStringField(strConfig, "fmt"),
+				Type:   getStringField(strConfig, "type"),
+			}
+		}
 	}
 
 	// Parse transforms if present
@@ -500,6 +521,13 @@ func (p *CompositionParser) parsePatch(patchMap map[string]interface{}) Patch {
 
 				patch.Transforms = append(patch.Transforms, transform)
 			}
+		}
+	}
+
+	// Parse policy if present
+	if policy, ok := patchMap["policy"].(map[string]interface{}); ok {
+		patch.Policy = &PatchPolicy{
+			FromFieldPath: getStringField(policy, "fromFieldPath"),
 		}
 	}
 

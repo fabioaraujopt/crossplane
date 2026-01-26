@@ -51,15 +51,26 @@ type Cmd struct {
 	ErrorOnMissingSchemas bool   `default:"false"                                                                     help:"Return non zero exit code if not all schemas are provided."`
 
 	// New validation flags
-	ValidatePatches       bool `default:"true"  help:"Validate that patch fromFieldPath and toFieldPath exist in their respective schemas."`
-	DetectUnusedParams    bool `default:"true"  help:"Detect XRD parameters that are defined but never used in composition patches."`
-	ValidateStatusChains  bool `default:"true"  help:"Validate status field propagation through composition hierarchies."`
-	StrictMode            bool `default:"false" help:"Treat warnings (like unused parameters) as errors."`
-	SkipCompositionChecks bool `default:"false" help:"Skip composition-level validations (patch paths, unused params)."`
-	ShowTree              bool `default:"false" help:"Show composition tree hierarchy and per-composition analysis."`
-	ShowDetails           bool `default:"true"  help:"Show detailed error messages (invalid patches, unused params per composition)."`
-	AutoDiscoverProviders bool `default:"false" help:"Automatically discover and download provider schemas based on resources used in compositions."`
-	OnlyInvalid           bool `default:"false" help:"Only show invalid/error results, hide all success output."`
+	ValidatePatches           bool `default:"true"  help:"Validate that patch fromFieldPath and toFieldPath exist in their respective schemas."`
+	DetectUnusedParams        bool `default:"true"  help:"Detect XRD parameters that are defined but never used in composition patches."`
+	ValidateStatusChains      bool `default:"true"  help:"Validate status field propagation through composition hierarchies."`
+	ValidateResourceSelectors bool `default:"true"  help:"Validate resource selectors (like subnetIdSelector) for ambiguous matches across compositions."`
+	StrictMode                bool `default:"false" help:"Treat warnings (like unused parameters) as errors."`
+	SkipCompositionChecks     bool `default:"false" help:"Skip composition-level validations (patch paths, unused params)."`
+	ShowTree                  bool `default:"false" help:"Show composition tree hierarchy and per-composition analysis."`
+	ShowDetails               bool `default:"true"  help:"Show detailed error messages (invalid patches, unused params per composition)."`
+	AutoDiscoverProviders     bool `default:"false" help:"Automatically discover and download provider schemas based on resources used in compositions."`
+	OnlyInvalid               bool `default:"false" help:"Only show invalid/error results, hide all success output."`
+
+	// Deletion safety validation flags
+	ValidateDeletionSafety bool `default:"true"  help:"Validate deletion safety patterns (rollbackLimit, IAM Usage, label matching)."`
+	ShowDeletionOrder      bool `default:"false" help:"Show the deletion order based on ClusterUsage objects."`
+
+	// Tag validation flags
+	ValidateTags        bool     `default:"true"  help:"Validate cloud resource tagging patterns (tag-manager presence, required tags, tag propagation)."`
+	RequiredTags        []string `default:"ManagedBy,StampName,Environment" help:"Required tags for cloud resources. Comma-separated list." sep:","`
+	ShowTagAnalysis     bool     `default:"false" help:"Show detailed tag propagation analysis tree."`
+	SkipTagCompositions []string `help:"Composition names to skip in tag validation. Comma-separated list." sep:","`
 
 	// Cluster-based schema fetching
 	UseCluster             bool   `default:"false" help:"Fetch CRD schemas from a live Kubernetes cluster instead of downloading from registry."`
@@ -113,15 +124,28 @@ This command performs the following validations:
    - Reports parameters defined in XRD but never used in any patch
    - Helps identify dead configuration code
 
-4. STRICT MODE (--strict-mode):
+4. RESOURCE SELECTOR VALIDATION (--validate-resource-selectors, default: true):
+   - Detects ambiguous selectors (like subnetIdSelector) that could match resources from multiple stamps
+   - Warns when selectors don't use matchControllerRef and could cause cross-stamp resource attachment
+   - Detects orphaned selectors using labels that aren't created by any composition
+   - Recommends adding unique identifying labels (e.g., stamp-name) for isolation
+
+5. STRICT MODE (--strict-mode):
    - Treats warnings (unused parameters) as errors
    - Returns non-zero exit code for any issue
 
-5. CRD SOURCES (--crd-sources):
+6. CRD SOURCES (--crd-sources):
    - Fetch CRDs from multiple sources for complete validation
    - Built-in well-known sources: upjet-aws, upjet-azure, nats-operator, datree-catalog
    - Custom GitHub repos, local directories, or the Datree catalog
    - Caches downloaded CRDs for faster subsequent runs
+
+7. DELETION SAFETY VALIDATION (--validate-deletion-safety, default: true):
+   - Validates Helm releases have rollbackLimit set (prevents permanent failure)
+   - Detects IRSA usage without IAM → Helm ClusterUsage protection
+   - Validates ClusterUsage selector labels match target resources
+   - Checks for known cross-composition deletion dependencies
+   - Use --show-deletion-order to visualize the deletion sequence
 
 Examples:
 
@@ -558,6 +582,29 @@ func (c *Cmd) Run(k *kong.Context, _ logging.Logger) error {
 				hasErrors = true
 			}
 		}
+
+		// 1f. Resource Selector Validation (subnetIdSelector, vpcIdSelector, etc.)
+		if c.ValidateResourceSelectors {
+			resourceSelectorValidator := NewResourceSelectorValidator(parser.GetCompositions())
+			resourceSelectorErrors := resourceSelectorValidator.Validate()
+
+			// Report resource selector issues
+			for _, rsErr := range resourceSelectorErrors {
+				prefix := "[x]"
+				if rsErr.Severity == "warning" {
+					prefix = "[!]"
+				}
+				if _, e := fmt.Fprintf(k.Stdout, "%s %s\n", prefix, rsErr.Error()); e != nil {
+					return errors.Wrap(e, errWriteOutput)
+				}
+
+				if rsErr.Severity == "error" {
+					hasErrors = true
+				} else if c.StrictMode {
+					hasErrors = true
+				}
+			}
+		}
 	}
 
 	// 2. Composition Validation (patch paths, unused params)
@@ -605,6 +652,92 @@ func (c *Cmd) Run(k *kong.Context, _ logging.Logger) error {
 			if err := PrintTreeAnalysis(treeResult, k.Stdout, c.ShowDetails); err != nil {
 				return errors.Wrapf(err, "cannot print tree analysis")
 			}
+		}
+	}
+
+	// 4. Deletion Safety Validation
+	if !c.SkipCompositionChecks && c.ValidateDeletionSafety {
+		allObjects := append(extensions, resources...)
+
+		// Parse compositions
+		parser := NewCompositionParser()
+		if err := parser.Parse(allObjects); err != nil {
+			return errors.Wrapf(err, "cannot parse compositions for deletion safety validation")
+		}
+
+		// Create and run deletion safety validator
+		deletionValidator := NewDeletionSafetyValidator(parser.GetCompositions(), allObjects)
+		deletionResult := deletionValidator.Validate()
+
+		// Print results
+		if err := PrintDeletionSafetyResults(deletionResult, k.Stdout, c.ShowDeletionOrder); err != nil {
+			return errors.Wrapf(err, "cannot print deletion safety results")
+		}
+
+		// Show deletion order if requested
+		if c.ShowDeletionOrder {
+			if err := deletionValidator.PrintDeletionOrder(deletionResult.DeletionOrder, k.Stdout); err != nil {
+				return errors.Wrapf(err, "cannot print deletion order")
+			}
+		}
+
+		// Check for errors
+		if deletionResult.HasErrors() {
+			hasErrors = true
+		}
+
+		// In strict mode, treat warnings as errors
+		if c.StrictMode && deletionResult.HasWarnings() {
+			hasErrors = true
+		}
+	}
+
+	// 5. Tag Validation
+	if !c.SkipCompositionChecks && c.ValidateTags {
+		// Create tag validator config
+		tagConfig := TagValidatorConfig{
+			RequiredTags:     c.RequiredTags,
+			SkipCompositions: c.SkipTagCompositions,
+		}
+
+		// Create and run tag validator
+		tagValidator := NewTagValidator(tagConfig)
+		tagResult := tagValidator.Validate(extensions)
+
+		// Print results
+		if err := PrintTagValidationResults(tagResult, k.Stdout, c.ShowTagAnalysis); err != nil {
+			return errors.Wrapf(err, "cannot print tag validation results")
+		}
+
+		// Show tag analysis tree if requested
+		if c.ShowTagAnalysis {
+			// Find root compositions (those that create PlatformStampV2 or similar)
+			for _, ext := range extensions {
+				if ext.GetKind() != "Composition" {
+					continue
+				}
+				compositeType, _, _ := unstructured.NestedString(ext.Object, "spec", "compositeTypeRef", "kind")
+				if compositeType == "PlatformStampV2" || compositeType == "TenantV2" {
+					tree := tagValidator.BuildTagPropagationTree(extensions, compositeType)
+					if tree != nil {
+						fmt.Fprintf(k.Stdout, "\n🏷️  Tag Propagation Tree (%s):\n", compositeType)
+						fmt.Fprintf(k.Stdout, "%s\n", tagValidator.PrintTagPropagationTree(tree, "", false))
+					}
+				}
+			}
+		}
+
+		// Check for errors - tag issues are warnings by default
+		if tagResult.MissingTagManager > 0 {
+			// Missing tag-manager is more serious
+			if c.StrictMode {
+				hasErrors = true
+			}
+		}
+
+		// In strict mode, treat all tag warnings as errors
+		if c.StrictMode && len(tagResult.Warnings) > 0 {
+			hasErrors = true
 		}
 	}
 

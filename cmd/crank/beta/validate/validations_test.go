@@ -3467,6 +3467,415 @@ func TestPatchTypeValidator_ValidCombineFromComposite(t *testing.T) {
 	}
 }
 
+func TestPatchTypeValidator_CombineFromCompositeFormatStringMismatch(t *testing.T) {
+	// CombineFromComposite with mismatched variable count vs placeholder count - should error
+	// This is the EBS CSI driver IAM role trust policy case
+
+	composition := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v1",
+			"kind":       "Composition",
+			"metadata": map[string]interface{}{
+				"name": "test-comp",
+			},
+			"spec": map[string]interface{}{
+				"compositeTypeRef": map[string]interface{}{
+					"apiVersion": "example.com/v1alpha1",
+					"kind":       "TestXR",
+				},
+				"mode": "Pipeline",
+				"pipeline": []interface{}{
+					map[string]interface{}{
+						"step": "patch-and-transform",
+						"functionRef": map[string]interface{}{
+							"name": "function-patch-and-transform",
+						},
+						"input": map[string]interface{}{
+							"apiVersion": "pt.fn.crossplane.io/v1beta1",
+							"kind":       "Resources",
+							"resources": []interface{}{
+								map[string]interface{}{
+									"name": "test-resource",
+									"base": map[string]interface{}{
+										"apiVersion": "test.io/v1beta1",
+										"kind":       "TestResource",
+									},
+									"patches": []interface{}{
+										map[string]interface{}{
+											"type": "CombineFromComposite",
+											"combine": map[string]interface{}{
+												"variables": []interface{}{
+													map[string]interface{}{"fromFieldPath": "spec.accountId"},
+													map[string]interface{}{"fromFieldPath": "status.oidcHostname"},
+													map[string]interface{}{"fromFieldPath": "status.oidcId"},
+													map[string]interface{}{"fromFieldPath": "status.oidcHostname"},
+													map[string]interface{}{"fromFieldPath": "status.oidcId"}, // 5 variables
+												},
+												"strategy": "string",
+												"string": map[string]interface{}{
+													"fmt": `{
+  "Principal": {"Federated": "arn:aws:iam::%s:oidc-provider/%s"},
+  "Condition": {"%s:aud": "sts.amazonaws.com"}
+}`, // Only 3 placeholders!
+												},
+											},
+											"toFieldPath": "spec.forProvider.assumeRolePolicy",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	xrd := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v1",
+			"kind":       "CompositeResourceDefinition",
+			"metadata": map[string]interface{}{
+				"name": "testxrs.example.com",
+			},
+			"spec": map[string]interface{}{
+				"group": "example.com",
+				"names": map[string]interface{}{
+					"kind":   "TestXR",
+					"plural": "testxrs",
+				},
+			},
+		},
+	}
+
+	parser := NewCompositionParser()
+	err := parser.Parse([]*unstructured.Unstructured{composition, xrd})
+	if err != nil {
+		t.Fatalf("Failed to parse: %v", err)
+	}
+
+	validator := NewPatchTypeValidator(parser.GetCompositions())
+	var buf strings.Builder
+	result, err := validator.Validate(&buf)
+	if err != nil {
+		t.Fatalf("Validation failed: %v", err)
+	}
+
+	if len(result.Errors) == 0 {
+		t.Fatal("Expected error for format string mismatch, got none")
+	}
+
+	found := false
+	for _, err := range result.Errors {
+		if strings.Contains(err.Message, "format string has 3 placeholder(s)") &&
+			strings.Contains(err.Message, "5 variable(s) defined") {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected error about placeholder/variable mismatch, got: %v", result.Errors)
+	}
+}
+
+func TestPatchTypeValidator_CombineFromCompositeValidFormatString(t *testing.T) {
+	// CombineFromComposite with matching variable count and placeholder count - should pass
+
+	composition := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v1",
+			"kind":       "Composition",
+			"metadata": map[string]interface{}{
+				"name": "test-comp",
+			},
+			"spec": map[string]interface{}{
+				"compositeTypeRef": map[string]interface{}{
+					"apiVersion": "example.com/v1alpha1",
+					"kind":       "TestXR",
+				},
+				"mode": "Pipeline",
+				"pipeline": []interface{}{
+					map[string]interface{}{
+						"step": "patch-and-transform",
+						"functionRef": map[string]interface{}{
+							"name": "function-patch-and-transform",
+						},
+						"input": map[string]interface{}{
+							"apiVersion": "pt.fn.crossplane.io/v1beta1",
+							"kind":       "Resources",
+							"resources": []interface{}{
+								map[string]interface{}{
+									"name": "test-resource",
+									"base": map[string]interface{}{
+										"apiVersion": "test.io/v1beta1",
+										"kind":       "TestResource",
+									},
+									"patches": []interface{}{
+										map[string]interface{}{
+											"type": "CombineFromComposite",
+											"combine": map[string]interface{}{
+												"variables": []interface{}{
+													map[string]interface{}{"fromFieldPath": "spec.accountId"},
+													map[string]interface{}{"fromFieldPath": "status.oidcHostname"},
+													map[string]interface{}{"fromFieldPath": "status.oidcHostname"},
+													map[string]interface{}{"fromFieldPath": "status.oidcHostname"},
+												},
+												"strategy": "string",
+												"string": map[string]interface{}{
+													"fmt": `{
+  "Principal": {"Federated": "arn:aws:iam::%s:oidc-provider/%s"},
+  "Condition": {
+    "%s:aud": "sts.amazonaws.com",
+    "%s:sub": "system:serviceaccount:kube-system:ebs-csi-controller-sa"
+  }
+}`, // 4 placeholders matching 4 variables
+												},
+											},
+											"toFieldPath": "spec.forProvider.assumeRolePolicy",
+											"policy": map[string]interface{}{
+												"fromFieldPath": "Required",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	xrd := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v1",
+			"kind":       "CompositeResourceDefinition",
+			"metadata": map[string]interface{}{
+				"name": "testxrs.example.com",
+			},
+			"spec": map[string]interface{}{
+				"group": "example.com",
+				"names": map[string]interface{}{
+					"kind":   "TestXR",
+					"plural": "testxrs",
+				},
+			},
+		},
+	}
+
+	parser := NewCompositionParser()
+	err := parser.Parse([]*unstructured.Unstructured{composition, xrd})
+	if err != nil {
+		t.Fatalf("Failed to parse: %v", err)
+	}
+
+	validator := NewPatchTypeValidator(parser.GetCompositions())
+	var buf strings.Builder
+	result, err := validator.Validate(&buf)
+	if err != nil {
+		t.Fatalf("Validation failed: %v", err)
+	}
+
+	// Should have no errors for matching count
+	if len(result.Errors) > 0 {
+		t.Errorf("Expected no errors for valid format string, got: %v", result.Errors)
+	}
+}
+
+func TestPatchTypeValidator_CombineFromCompositeInvalidJSON(t *testing.T) {
+	// CombineFromComposite with invalid JSON template - should warn
+
+	composition := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v1",
+			"kind":       "Composition",
+			"metadata": map[string]interface{}{
+				"name": "test-comp",
+			},
+			"spec": map[string]interface{}{
+				"compositeTypeRef": map[string]interface{}{
+					"apiVersion": "example.com/v1alpha1",
+					"kind":       "TestXR",
+				},
+				"mode": "Pipeline",
+				"pipeline": []interface{}{
+					map[string]interface{}{
+						"step": "patch-and-transform",
+						"functionRef": map[string]interface{}{
+							"name": "function-patch-and-transform",
+						},
+						"input": map[string]interface{}{
+							"apiVersion": "pt.fn.crossplane.io/v1beta1",
+							"kind":       "Resources",
+							"resources": []interface{}{
+								map[string]interface{}{
+									"name": "test-resource",
+									"base": map[string]interface{}{
+										"apiVersion": "test.io/v1beta1",
+										"kind":       "TestResource",
+									},
+									"patches": []interface{}{
+										map[string]interface{}{
+											"type": "CombineFromComposite",
+											"combine": map[string]interface{}{
+												"variables": []interface{}{
+													map[string]interface{}{"fromFieldPath": "spec.value"},
+												},
+												"strategy": "string",
+												"string": map[string]interface{}{
+													"fmt": `{
+  "key": "%s",
+  trailing: "comma",
+}`, // Invalid JSON - missing quotes around key
+												},
+											},
+											"toFieldPath": "spec.forProvider.assumeRolePolicy",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	xrd := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v1",
+			"kind":       "CompositeResourceDefinition",
+			"metadata": map[string]interface{}{
+				"name": "testxrs.example.com",
+			},
+			"spec": map[string]interface{}{
+				"group": "example.com",
+				"names": map[string]interface{}{
+					"kind":   "TestXR",
+					"plural": "testxrs",
+				},
+			},
+		},
+	}
+
+	parser := NewCompositionParser()
+	err := parser.Parse([]*unstructured.Unstructured{composition, xrd})
+	if err != nil {
+		t.Fatalf("Failed to parse: %v", err)
+	}
+
+	validator := NewPatchTypeValidator(parser.GetCompositions())
+	var buf strings.Builder
+	result, err := validator.Validate(&buf)
+	if err != nil {
+		t.Fatalf("Validation failed: %v", err)
+	}
+
+	// Should have a warning for invalid JSON (warnings are now in result.Warnings)
+	found := false
+	for _, warn := range result.Warnings {
+		if strings.Contains(warn.Message, "invalid JSON") {
+			found = true
+			break
+		}
+	}
+
+	if !found {
+		t.Errorf("Expected warning about invalid JSON, got warnings: %v, errors: %v", result.Warnings, result.Errors)
+	}
+}
+
+func TestPatchTypeValidator_CombineFromCompositeNoFormatString(t *testing.T) {
+	// CombineFromComposite without string.fmt - should still pass basic validation
+
+	composition := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v1",
+			"kind":       "Composition",
+			"metadata": map[string]interface{}{
+				"name": "test-comp",
+			},
+			"spec": map[string]interface{}{
+				"compositeTypeRef": map[string]interface{}{
+					"apiVersion": "example.com/v1alpha1",
+					"kind":       "TestXR",
+				},
+				"mode": "Pipeline",
+				"pipeline": []interface{}{
+					map[string]interface{}{
+						"step": "patch-and-transform",
+						"functionRef": map[string]interface{}{
+							"name": "function-patch-and-transform",
+						},
+						"input": map[string]interface{}{
+							"apiVersion": "pt.fn.crossplane.io/v1beta1",
+							"kind":       "Resources",
+							"resources": []interface{}{
+								map[string]interface{}{
+									"name": "test-resource",
+									"base": map[string]interface{}{
+										"apiVersion": "test.io/v1beta1",
+										"kind":       "TestResource",
+									},
+									"patches": []interface{}{
+										map[string]interface{}{
+											"type": "CombineFromComposite",
+											"combine": map[string]interface{}{
+												"variables": []interface{}{
+													map[string]interface{}{"fromFieldPath": "spec.value"},
+												},
+												"strategy": "string",
+												// No string.fmt specified
+											},
+											"toFieldPath": "spec.forProvider.value",
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	xrd := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v1",
+			"kind":       "CompositeResourceDefinition",
+			"metadata": map[string]interface{}{
+				"name": "testxrs.example.com",
+			},
+			"spec": map[string]interface{}{
+				"group": "example.com",
+				"names": map[string]interface{}{
+					"kind":   "TestXR",
+					"plural": "testxrs",
+				},
+			},
+		},
+	}
+
+	parser := NewCompositionParser()
+	err := parser.Parse([]*unstructured.Unstructured{composition, xrd})
+	if err != nil {
+		t.Fatalf("Failed to parse: %v", err)
+	}
+
+	validator := NewPatchTypeValidator(parser.GetCompositions())
+	var buf strings.Builder
+	result, err := validator.Validate(&buf)
+	if err != nil {
+		t.Fatalf("Validation failed: %v", err)
+	}
+
+	// Should have no errors - format string validation is optional
+	if len(result.Errors) > 0 {
+		t.Errorf("Expected no errors when format string is not specified, got: %v", result.Errors)
+	}
+}
+
 func TestPatchTypeValidator_FromCompositeWithoutFromFieldPath(t *testing.T) {
 	// FromCompositeFieldPath without fromFieldPath - should error
 
@@ -4381,5 +4790,619 @@ func TestPatchTypeMismatchValidator_StatusTypeMismatch(t *testing.T) {
 	}
 	if !foundMismatch {
 		t.Errorf("Expected status type mismatch error, got: %v", errors)
+	}
+}
+
+// =============================================================================
+// Status Dependency Policy Validation Tests
+// =============================================================================
+
+func TestPatchTypeValidator_StatusDependencyWithoutRequiredPolicy(t *testing.T) {
+	// Patch reading from status.* without Required policy should warn
+	composition := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v1",
+			"kind":       "Composition",
+			"metadata": map[string]interface{}{
+				"name": "test-karpenter",
+			},
+			"spec": map[string]interface{}{
+				"compositeTypeRef": map[string]interface{}{
+					"apiVersion": "example.com/v1alpha1",
+					"kind":       "TestXR",
+				},
+				"pipeline": []interface{}{
+					map[string]interface{}{
+						"step": "patch-and-transform",
+						"functionRef": map[string]interface{}{
+							"name": "function-patch-and-transform",
+						},
+						"input": map[string]interface{}{
+							"apiVersion": "pt.fn.crossplane.io/v1beta1",
+							"kind":       "Resources",
+							"resources": []interface{}{
+								map[string]interface{}{
+									"name": "helm-release",
+									"base": map[string]interface{}{
+										"apiVersion": "helm.crossplane.io/v1beta1",
+										"kind":       "Release",
+									},
+									"patches": []interface{}{
+										map[string]interface{}{
+											"type":          "FromCompositeFieldPath",
+											"fromFieldPath": "status.controllerRoleArn",
+											"toFieldPath":   "spec.forProvider.values.serviceAccount.annotations[eks.amazonaws.com/role-arn]",
+											// Missing: policy.fromFieldPath: Required
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	xrd := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v2",
+			"kind":       "CompositeResourceDefinition",
+			"metadata": map[string]interface{}{
+				"name": "xtestxrs.example.com",
+			},
+			"spec": map[string]interface{}{
+				"group": "example.com",
+				"names": map[string]interface{}{
+					"kind":   "TestXR",
+					"plural": "testxrs",
+				},
+				"versions": []interface{}{
+					map[string]interface{}{
+						"name":          "v1alpha1",
+						"served":        true,
+						"referenceable": true,
+						"schema": map[string]interface{}{
+							"openAPIV3Schema": map[string]interface{}{
+								"type": "object",
+								"properties": map[string]interface{}{
+									"status": map[string]interface{}{
+										"type": "object",
+										"properties": map[string]interface{}{
+											"controllerRoleArn": map[string]interface{}{
+												"type": "string",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	parser := NewCompositionParser()
+	err := parser.Parse([]*unstructured.Unstructured{composition, xrd})
+	if err != nil {
+		t.Fatalf("Failed to parse: %v", err)
+	}
+
+	validator := NewPatchTypeValidator(parser.GetCompositions())
+	var buf strings.Builder
+	result, err := validator.Validate(&buf)
+	if err != nil {
+		t.Fatalf("Validation failed: %v", err)
+	}
+
+	// Should have an error about status dependency without Required
+	foundError := false
+	for _, e := range result.Errors {
+		if strings.Contains(e.Message, "status dependency") && strings.Contains(e.Message, "Required") {
+			foundError = true
+			t.Logf("Found expected error: %s", e.Message)
+		}
+	}
+	if !foundError {
+		t.Errorf("Expected error about status dependency without Required policy, got errors: %v", result.Errors)
+	}
+}
+
+func TestPatchTypeValidator_StatusDependencyWithRequiredPolicy(t *testing.T) {
+	// Patch reading from status.* WITH Required policy should NOT warn
+	composition := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v1",
+			"kind":       "Composition",
+			"metadata": map[string]interface{}{
+				"name": "test-karpenter-fixed",
+			},
+			"spec": map[string]interface{}{
+				"compositeTypeRef": map[string]interface{}{
+					"apiVersion": "example.com/v1alpha1",
+					"kind":       "TestXR",
+				},
+				"pipeline": []interface{}{
+					map[string]interface{}{
+						"step": "patch-and-transform",
+						"functionRef": map[string]interface{}{
+							"name": "function-patch-and-transform",
+						},
+						"input": map[string]interface{}{
+							"apiVersion": "pt.fn.crossplane.io/v1beta1",
+							"kind":       "Resources",
+							"resources": []interface{}{
+								map[string]interface{}{
+									"name": "helm-release",
+									"base": map[string]interface{}{
+										"apiVersion": "helm.crossplane.io/v1beta1",
+										"kind":       "Release",
+									},
+									"patches": []interface{}{
+										map[string]interface{}{
+											"type":          "FromCompositeFieldPath",
+											"fromFieldPath": "status.controllerRoleArn",
+											"toFieldPath":   "spec.forProvider.values.serviceAccount.annotations[eks.amazonaws.com/role-arn]",
+											"policy": map[string]interface{}{
+												"fromFieldPath": "Required",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	xrd := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v2",
+			"kind":       "CompositeResourceDefinition",
+			"metadata": map[string]interface{}{
+				"name": "xtestxrs.example.com",
+			},
+			"spec": map[string]interface{}{
+				"group": "example.com",
+				"names": map[string]interface{}{
+					"kind":   "TestXR",
+					"plural": "testxrs",
+				},
+				"versions": []interface{}{
+					map[string]interface{}{
+						"name":          "v1alpha1",
+						"served":        true,
+						"referenceable": true,
+						"schema": map[string]interface{}{
+							"openAPIV3Schema": map[string]interface{}{
+								"type": "object",
+								"properties": map[string]interface{}{
+									"status": map[string]interface{}{
+										"type": "object",
+										"properties": map[string]interface{}{
+											"controllerRoleArn": map[string]interface{}{
+												"type": "string",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	parser := NewCompositionParser()
+	err := parser.Parse([]*unstructured.Unstructured{composition, xrd})
+	if err != nil {
+		t.Fatalf("Failed to parse: %v", err)
+	}
+
+	validator := NewPatchTypeValidator(parser.GetCompositions())
+	var buf strings.Builder
+	result, err := validator.Validate(&buf)
+	if err != nil {
+		t.Fatalf("Validation failed: %v", err)
+	}
+
+	// Should NOT have any error about status dependency
+	for _, e := range result.Errors {
+		if strings.Contains(e.Message, "status dependency") {
+			t.Errorf("Should not error about status dependency when Required policy is set, got: %s", e.Message)
+		}
+	}
+}
+
+func TestPatchTypeValidator_CombineStatusDependencyWithoutRequiredPolicy(t *testing.T) {
+	// CombineFromComposite reading from status.* without Required policy should warn
+	composition := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v1",
+			"kind":       "Composition",
+			"metadata": map[string]interface{}{
+				"name": "test-iam-role",
+			},
+			"spec": map[string]interface{}{
+				"compositeTypeRef": map[string]interface{}{
+					"apiVersion": "example.com/v1alpha1",
+					"kind":       "TestXR",
+				},
+				"pipeline": []interface{}{
+					map[string]interface{}{
+						"step": "patch-and-transform",
+						"functionRef": map[string]interface{}{
+							"name": "function-patch-and-transform",
+						},
+						"input": map[string]interface{}{
+							"apiVersion": "pt.fn.crossplane.io/v1beta1",
+							"kind":       "Resources",
+							"resources": []interface{}{
+								map[string]interface{}{
+									"name": "iam-role",
+									"base": map[string]interface{}{
+										"apiVersion": "iam.aws.upbound.io/v1beta1",
+										"kind":       "Role",
+									},
+									"patches": []interface{}{
+										map[string]interface{}{
+											"type": "CombineFromComposite",
+											"combine": map[string]interface{}{
+												"variables": []interface{}{
+													map[string]interface{}{"fromFieldPath": "spec.parameters.accountId"},
+													map[string]interface{}{"fromFieldPath": "status.oidcIssuerHostname"}, // Status dependency!
+													map[string]interface{}{"fromFieldPath": "status.oidcIssuerId"},       // Status dependency!
+												},
+												"strategy": "string",
+												"string": map[string]interface{}{
+													"fmt": `{"Federated": "arn:aws:iam::%s:oidc-provider/%s", "Condition": {"%s:aud": "sts"}}`,
+												},
+											},
+											"toFieldPath": "spec.forProvider.assumeRolePolicy",
+											// Missing: policy.fromFieldPath: Required
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	xrd := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v2",
+			"kind":       "CompositeResourceDefinition",
+			"metadata": map[string]interface{}{
+				"name": "xtestxrs.example.com",
+			},
+			"spec": map[string]interface{}{
+				"group": "example.com",
+				"names": map[string]interface{}{
+					"kind":   "TestXR",
+					"plural": "testxrs",
+				},
+				"versions": []interface{}{
+					map[string]interface{}{
+						"name":          "v1alpha1",
+						"served":        true,
+						"referenceable": true,
+						"schema": map[string]interface{}{
+							"openAPIV3Schema": map[string]interface{}{
+								"type": "object",
+								"properties": map[string]interface{}{
+									"spec": map[string]interface{}{
+										"type": "object",
+										"properties": map[string]interface{}{
+											"parameters": map[string]interface{}{
+												"type": "object",
+												"properties": map[string]interface{}{
+													"accountId": map[string]interface{}{
+														"type": "string",
+													},
+												},
+											},
+										},
+									},
+									"status": map[string]interface{}{
+										"type": "object",
+										"properties": map[string]interface{}{
+											"oidcIssuerHostname": map[string]interface{}{
+												"type": "string",
+											},
+											"oidcIssuerId": map[string]interface{}{
+												"type": "string",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	parser := NewCompositionParser()
+	err := parser.Parse([]*unstructured.Unstructured{composition, xrd})
+	if err != nil {
+		t.Fatalf("Failed to parse: %v", err)
+	}
+
+	validator := NewPatchTypeValidator(parser.GetCompositions())
+	var buf strings.Builder
+	result, err := validator.Validate(&buf)
+	if err != nil {
+		t.Fatalf("Validation failed: %v", err)
+	}
+
+	// Should have an error about status dependency without Required
+	foundError := false
+	for _, e := range result.Errors {
+		if strings.Contains(e.Message, "status dependency") || strings.Contains(e.Message, "status fields") {
+			foundError = true
+			t.Logf("Found expected error: %s", e.Message)
+			// Verify it mentions both status fields
+			if !strings.Contains(e.Message, "oidcIssuerHostname") || !strings.Contains(e.Message, "oidcIssuerId") {
+				t.Logf("Error should mention all status fields being read")
+			}
+		}
+	}
+	if !foundError {
+		t.Errorf("Expected error about CombineFromComposite status dependency without Required policy, got errors: %v", result.Errors)
+	}
+}
+
+func TestPatchTypeValidator_CombineStatusDependencyWithRequiredPolicy(t *testing.T) {
+	// CombineFromComposite reading from status.* WITH Required policy should NOT warn
+	composition := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v1",
+			"kind":       "Composition",
+			"metadata": map[string]interface{}{
+				"name": "test-iam-role-fixed",
+			},
+			"spec": map[string]interface{}{
+				"compositeTypeRef": map[string]interface{}{
+					"apiVersion": "example.com/v1alpha1",
+					"kind":       "TestXR",
+				},
+				"pipeline": []interface{}{
+					map[string]interface{}{
+						"step": "patch-and-transform",
+						"functionRef": map[string]interface{}{
+							"name": "function-patch-and-transform",
+						},
+						"input": map[string]interface{}{
+							"apiVersion": "pt.fn.crossplane.io/v1beta1",
+							"kind":       "Resources",
+							"resources": []interface{}{
+								map[string]interface{}{
+									"name": "iam-role",
+									"base": map[string]interface{}{
+										"apiVersion": "iam.aws.upbound.io/v1beta1",
+										"kind":       "Role",
+									},
+									"patches": []interface{}{
+										map[string]interface{}{
+											"type": "CombineFromComposite",
+											"combine": map[string]interface{}{
+												"variables": []interface{}{
+													map[string]interface{}{"fromFieldPath": "spec.parameters.accountId"},
+													map[string]interface{}{"fromFieldPath": "status.oidcIssuerHostname"},
+													map[string]interface{}{"fromFieldPath": "status.oidcIssuerId"},
+												},
+												"strategy": "string",
+												"string": map[string]interface{}{
+													"fmt": `{"Federated": "arn:aws:iam::%s:oidc-provider/%s", "Condition": {"%s:aud": "sts"}}`,
+												},
+											},
+											"toFieldPath": "spec.forProvider.assumeRolePolicy",
+											"policy": map[string]interface{}{
+												"fromFieldPath": "Required",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	xrd := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v2",
+			"kind":       "CompositeResourceDefinition",
+			"metadata": map[string]interface{}{
+				"name": "xtestxrs.example.com",
+			},
+			"spec": map[string]interface{}{
+				"group": "example.com",
+				"names": map[string]interface{}{
+					"kind":   "TestXR",
+					"plural": "testxrs",
+				},
+				"versions": []interface{}{
+					map[string]interface{}{
+						"name":          "v1alpha1",
+						"served":        true,
+						"referenceable": true,
+						"schema": map[string]interface{}{
+							"openAPIV3Schema": map[string]interface{}{
+								"type": "object",
+								"properties": map[string]interface{}{
+									"spec": map[string]interface{}{
+										"type": "object",
+										"properties": map[string]interface{}{
+											"parameters": map[string]interface{}{
+												"type": "object",
+												"properties": map[string]interface{}{
+													"accountId": map[string]interface{}{
+														"type": "string",
+													},
+												},
+											},
+										},
+									},
+									"status": map[string]interface{}{
+										"type": "object",
+										"properties": map[string]interface{}{
+											"oidcIssuerHostname": map[string]interface{}{
+												"type": "string",
+											},
+											"oidcIssuerId": map[string]interface{}{
+												"type": "string",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	parser := NewCompositionParser()
+	err := parser.Parse([]*unstructured.Unstructured{composition, xrd})
+	if err != nil {
+		t.Fatalf("Failed to parse: %v", err)
+	}
+
+	validator := NewPatchTypeValidator(parser.GetCompositions())
+	var buf strings.Builder
+	result, err := validator.Validate(&buf)
+	if err != nil {
+		t.Fatalf("Validation failed: %v", err)
+	}
+
+	// Should NOT have any error about status dependency
+	for _, e := range result.Errors {
+		if strings.Contains(e.Message, "status dependency") || strings.Contains(e.Message, "status fields") {
+			t.Errorf("Should not error about status dependency when Required policy is set, got: %s", e.Message)
+		}
+	}
+}
+
+func TestPatchTypeValidator_SpecFieldWithoutRequiredPolicy(t *testing.T) {
+	// Patch reading from spec.* (NOT status) should NOT warn even without Required
+	composition := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v1",
+			"kind":       "Composition",
+			"metadata": map[string]interface{}{
+				"name": "test-spec-only",
+			},
+			"spec": map[string]interface{}{
+				"compositeTypeRef": map[string]interface{}{
+					"apiVersion": "example.com/v1alpha1",
+					"kind":       "TestXR",
+				},
+				"pipeline": []interface{}{
+					map[string]interface{}{
+						"step": "patch-and-transform",
+						"functionRef": map[string]interface{}{
+							"name": "function-patch-and-transform",
+						},
+						"input": map[string]interface{}{
+							"apiVersion": "pt.fn.crossplane.io/v1beta1",
+							"kind":       "Resources",
+							"resources": []interface{}{
+								map[string]interface{}{
+									"name": "test-resource",
+									"base": map[string]interface{}{
+										"apiVersion": "test.io/v1beta1",
+										"kind":       "TestResource",
+									},
+									"patches": []interface{}{
+										map[string]interface{}{
+											"type":          "FromCompositeFieldPath",
+											"fromFieldPath": "spec.parameters.region",
+											"toFieldPath":   "spec.forProvider.region",
+											// No policy - should be fine for spec.* fields
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	xrd := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v2",
+			"kind":       "CompositeResourceDefinition",
+			"metadata": map[string]interface{}{
+				"name": "xtestxrs.example.com",
+			},
+			"spec": map[string]interface{}{
+				"group": "example.com",
+				"names": map[string]interface{}{
+					"kind":   "TestXR",
+					"plural": "testxrs",
+				},
+				"versions": []interface{}{
+					map[string]interface{}{
+						"name":          "v1alpha1",
+						"served":        true,
+						"referenceable": true,
+						"schema": map[string]interface{}{
+							"openAPIV3Schema": map[string]interface{}{
+								"type": "object",
+								"properties": map[string]interface{}{
+									"spec": map[string]interface{}{
+										"type": "object",
+										"properties": map[string]interface{}{
+											"parameters": map[string]interface{}{
+												"type": "object",
+												"properties": map[string]interface{}{
+													"region": map[string]interface{}{
+														"type": "string",
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	parser := NewCompositionParser()
+	err := parser.Parse([]*unstructured.Unstructured{composition, xrd})
+	if err != nil {
+		t.Fatalf("Failed to parse: %v", err)
+	}
+
+	validator := NewPatchTypeValidator(parser.GetCompositions())
+	var buf strings.Builder
+	result, err := validator.Validate(&buf)
+	if err != nil {
+		t.Fatalf("Validation failed: %v", err)
+	}
+
+	// Should NOT have any error - spec.* fields don't need Required
+	for _, e := range result.Errors {
+		if strings.Contains(e.Message, "status dependency") {
+			t.Errorf("Should not error about status dependency for spec.* fields, got: %s", e.Message)
+		}
 	}
 }

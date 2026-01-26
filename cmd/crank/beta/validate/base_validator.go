@@ -122,10 +122,7 @@ func FilterRequiredFieldErrors(errors field.ErrorList, resourceName string, coll
 		// Check if this is a "Required value" error
 		if err.Type == field.ErrorTypeRequired {
 			// Convert field path to string (remove leading dot if present)
-			fieldPath := err.Field
-			if strings.HasPrefix(fieldPath, ".") {
-				fieldPath = fieldPath[1:]
-			}
+			fieldPath := strings.TrimPrefix(err.Field, ".")
 
 			// Check if this field is patched
 			if collector.IsFieldPatched(resourceName, fieldPath) {

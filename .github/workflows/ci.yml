@@ -32,7 +32,13 @@ jobs:
 
       - name: Run validator tests
         run: |
+          echo "Running all validator tests including deletion safety checks..."
           go test -v -race -coverprofile=coverage.out ./cmd/crank/beta/validate/...
+      
+      - name: Run deletion safety tests specifically
+        run: |
+          echo "Running deletion safety validator tests..."
+          go test -v ./cmd/crank/beta/validate/... -run "TestDeletion|TestValidateRollback|TestValidateUsage|TestValidateIAM|TestBuildDeletion|TestCrossComposition"
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4
@@ -82,3 +88,10 @@ jobs:
       - name: Verify crank works
         run: |
           ./crank beta validate --help
+      
+      - name: Verify deletion safety flags
+        run: |
+          echo "Testing deletion safety validator flags..."
+          ./crank beta validate --help | grep -q "validate-deletion-safety" || exit 1
+          ./crank beta validate --help | grep -q "show-deletion-order" || exit 1
+          echo "✅ Deletion safety flags found in help output"
