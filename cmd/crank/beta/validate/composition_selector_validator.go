@@ -143,34 +143,45 @@ func (v *CompositionSelectorValidator) Validate() []CompositionSelectorError {
 				}
 
 				// For dynamically-patched labels, we need to verify compositions exist
-				// with each possible enum value
+				// with each possible combination of enum values
 				hasDynamicLabels := len(dynamicLabels) > 0
 
 				if hasDynamicLabels {
-					// Validate that compositions exist for ALL possible dynamic values
-					for labelKey, possibleValues := range dynamicLabels {
-						if len(possibleValues) == 0 {
-							// Couldn't determine possible values - skip warning
-							continue
-						}
+					// Generate all combinations of dynamic label values (cartesian product)
+					combinations := v.generateLabelCombinations(dynamicLabels)
 
-						for _, labelValue := range possibleValues {
+					if len(combinations) == 0 {
+						// Couldn't determine possible values - skip validation
+					} else {
+						for _, dynamicLabelValues := range combinations {
+							// Build test selector: static labels + this combination of dynamic labels
 							testSelector := make(map[string]string)
+							// Add static labels (non-empty values from base)
 							for k, val := range effectiveSelector {
-								if k != labelKey {
+								if val != "" && dynamicLabels[k] == nil {
 									testSelector[k] = val
 								}
 							}
-							testSelector[labelKey] = labelValue
+							// Add dynamic label combination
+							for k, val := range dynamicLabelValues {
+								testSelector[k] = val
+							}
 
 							matchingComps := v.findMatchingCompositions(kind, testSelector)
 							if len(matchingComps) == 0 {
+								// Format the dynamic values for the error message
+								var dynamicParts []string
+								for k, val := range dynamicLabelValues {
+									dynamicParts = append(dynamicParts, fmt.Sprintf("%s=%s", k, val))
+								}
+								sort.Strings(dynamicParts)
+
 								errors = append(errors, CompositionSelectorError{
 									CompositionName: comp.Name,
 									ResourceName:    res.Name,
 									TargetKind:      kind,
 									Selector:        testSelector,
-									Message:         fmt.Sprintf("no composition of kind '%s' matches dynamic selector value '%s=%s'", kind, labelKey, labelValue),
+									Message:         fmt.Sprintf("no composition of kind '%s' matches dynamic selector combination {%s}", kind, strings.Join(dynamicParts, ", ")),
 									Severity:        "error",
 								})
 							} else {
@@ -423,6 +434,57 @@ func (v *CompositionSelectorValidator) applyTransforms(value string, transforms 
 	}
 
 	return result
+}
+
+// generateLabelCombinations generates all combinations (cartesian product) of dynamic label values.
+// Input: {"provider": ["aws", "azure"], "production": ["true", "false"]}
+// Output: [{"provider": "aws", "production": "true"}, {"provider": "aws", "production": "false"}, ...]
+func (v *CompositionSelectorValidator) generateLabelCombinations(dynamicLabels map[string][]string) []map[string]string {
+	// Collect label keys and their values
+	var keys []string
+	var valueLists [][]string
+	for k, vals := range dynamicLabels {
+		if len(vals) > 0 {
+			keys = append(keys, k)
+			valueLists = append(valueLists, vals)
+		}
+	}
+
+	if len(keys) == 0 {
+		return nil
+	}
+
+	// Sort keys for deterministic output
+	sort.Strings(keys)
+	// Reorder valueLists to match sorted keys
+	sortedValueLists := make([][]string, len(keys))
+	for i, k := range keys {
+		sortedValueLists[i] = dynamicLabels[k]
+	}
+
+	// Generate cartesian product
+	var results []map[string]string
+	var generate func(index int, current map[string]string)
+	generate = func(index int, current map[string]string) {
+		if index == len(keys) {
+			// Make a copy of current map
+			result := make(map[string]string)
+			for k, v := range current {
+				result[k] = v
+			}
+			results = append(results, result)
+			return
+		}
+
+		key := keys[index]
+		for _, val := range sortedValueLists[index] {
+			current[key] = val
+			generate(index+1, current)
+		}
+	}
+
+	generate(0, make(map[string]string))
+	return results
 }
 
 // findMatchingCompositions finds all compositions of the given kind that match the selector.
