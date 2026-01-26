@@ -579,14 +579,27 @@ var knownDeletionDependencies = []KnownDeletionDependency{
 	},
 }
 
+// extractGroup extracts the API group from an apiVersion string (e.g., "cloud.physicsx.ai/v1alpha1" -> "cloud.physicsx.ai")
+func extractGroup(apiVersion string) string {
+	parts := strings.Split(apiVersion, "/")
+	if len(parts) >= 1 {
+		return parts[0]
+	}
+	return apiVersion
+}
+
 // validateCrossCompositionDependencies checks for missing cross-composition Usage objects.
 func (v *DeletionSafetyValidator) validateCrossCompositionDependencies() []DeletionSafetyIssue {
 	var issues []DeletionSafetyIssue
 
 	// Build a set of existing Usage relationships
+	// Use Kind/Group (not Kind/APIVersion) to match against known dependencies
 	existingUsages := make(map[string]bool)
 	for _, usage := range v.usages {
-		key := fmt.Sprintf("%s/%s->%s/%s", usage.OfKind, usage.OfAPIVersion, usage.ByKind, usage.ByAPIVersion)
+		// Extract group from apiVersion (e.g., "cloud.physicsx.ai/v1alpha1" -> "cloud.physicsx.ai")
+		ofGroup := extractGroup(usage.OfAPIVersion)
+		byGroup := extractGroup(usage.ByAPIVersion)
+		key := fmt.Sprintf("%s/%s->%s/%s", usage.OfKind, ofGroup, usage.ByKind, byGroup)
 		existingUsages[key] = true
 	}
 
