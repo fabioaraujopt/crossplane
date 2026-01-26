@@ -688,13 +688,45 @@ func isJSONField(fieldPath string) bool {
 		strings.Contains(fieldLower, "document")
 }
 
+// isHCLContent checks if content appears to be HashiCorp Configuration Language (HCL)
+// rather than JSON. HCL is used by Vault policies, Terraform, etc.
+func isHCLContent(content string) bool {
+	trimmed := strings.TrimSpace(content)
+
+	// Vault policy HCL patterns
+	if strings.HasPrefix(trimmed, "path \"") {
+		return true
+	}
+
+	// HCL block patterns (Terraform, Vault, etc.)
+	// e.g., "resource \"aws_instance\" \"example\" {"
+	if strings.Contains(trimmed, "\" \"") && strings.Contains(trimmed, "{") {
+		// Check for HCL-style blocks
+		if strings.Contains(trimmed, "capabilities") && strings.Contains(trimmed, "read") {
+			return true
+		}
+	}
+
+	return false
+}
+
 // validateJSONTemplate validates that a format string template produces valid JSON.
+// Returns nil if the template is valid JSON or if it's HCL content (not JSON).
 func validateJSONTemplate(template string, variableCount int) error {
+	// Skip validation for HCL content (Vault policies, Terraform, etc.)
+	if isHCLContent(template) {
+		return nil
+	}
+
 	// Replace all %s placeholders with dummy values
 	testStr := template
 	for i := 0; i < variableCount; i++ {
 		testStr = strings.Replace(testStr, "%s", "test-value", 1)
 	}
+
+	// Also handle positional placeholders like %[1]s, %[2]s
+	re := regexp.MustCompile(`%\[\d+\]s`)
+	testStr = re.ReplaceAllString(testStr, "test-value")
 
 	// Try to parse as JSON
 	var js interface{}

@@ -2,6 +2,69 @@ package validate
 
 import "testing"
 
+func TestIsHCLContent(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		expected bool
+	}{
+		{
+			name: "Vault policy - simple path",
+			content: `path "secret/data/dev/*" {
+  capabilities = ["read"]
+}`,
+			expected: true,
+		},
+		{
+			name: "Vault policy - multiple paths",
+			content: `path "secret/data/%s/%s/*" {
+  capabilities = ["read"]
+}
+path "secret/metadata/%s/%s/*" {
+  capabilities = ["read"]
+}`,
+			expected: true,
+		},
+		{
+			name:     "JSON - AWS IAM policy",
+			content:  `{"Version": "2012-10-17", "Statement": [{"Effect": "Allow"}]}`,
+			expected: false,
+		},
+		{
+			name: "JSON - multiline IAM policy",
+			content: `{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Action": "s3:*"
+    }
+  ]
+}`,
+			expected: false,
+		},
+		{
+			name:     "Empty string",
+			content:  "",
+			expected: false,
+		},
+		{
+			name:     "Simple string",
+			content:  "hello world",
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isHCLContent(tt.content)
+			if got != tt.expected {
+				t.Errorf("isHCLContent() = %v, want %v for content: %s", got, tt.expected, tt.content)
+			}
+		})
+	}
+}
+
 func TestCountFormatPlaceholders(t *testing.T) {
 	tests := []struct {
 		name     string
