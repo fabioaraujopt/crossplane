@@ -4413,6 +4413,421 @@ spec:
 }
 
 // =============================================================================
+// Dynamic Selector Tracing Tests (Option B)
+// =============================================================================
+
+func TestCompositionSelectorValidator_DynamicSelectorFromEnum(t *testing.T) {
+	// This tests the real-world pattern where:
+	// 1. Parent composition has spec.parameters.cloud with enum ["aws", "azure"]
+	// 2. Patch sets compositionSelector.matchLabels.provider from spec.parameters.cloud
+	// 3. Child compositions have labels provider=aws and provider=azure
+
+	// AWS composition with label
+	awsComp := &ParsedComposition{
+		Name:             "stamp-cluster-aws",
+		CompositeTypeRef: schema.GroupVersionKind{Group: "example.com", Version: "v1alpha1", Kind: "XRCluster"},
+		Labels: map[string]string{
+			"provider": "aws",
+		},
+	}
+
+	// Azure composition with label
+	azureComp := &ParsedComposition{
+		Name:             "stamp-cluster-azure",
+		CompositeTypeRef: schema.GroupVersionKind{Group: "example.com", Version: "v1alpha1", Kind: "XRCluster"},
+		Labels: map[string]string{
+			"provider": "azure",
+		},
+	}
+
+	// Parent composition that dynamically selects based on spec.parameters.cloud
+	parentComp := &ParsedComposition{
+		Name:             "stamp-common",
+		CompositeTypeRef: schema.GroupVersionKind{Group: "example.com", Version: "v1alpha1", Kind: "XRCommon"},
+		Resources: []ComposedResource{
+			{
+				Name: "cluster",
+				Base: &unstructured.Unstructured{
+					Object: map[string]interface{}{
+						"apiVersion": "example.com/v1alpha1",
+						"kind":       "XRCluster",
+						"spec": map[string]interface{}{
+							"compositionSelector": map[string]interface{}{
+								"matchLabels": map[string]interface{}{
+									"provider": "", // Empty - will be patched
+								},
+							},
+						},
+					},
+				},
+				CompositionSelector: map[string]string{
+					"provider": "", // Empty in base
+				},
+				Patches: []Patch{
+					{
+						Type:          PatchTypeFromCompositeFieldPath,
+						FromFieldPath: "spec.parameters.cloud",
+						ToFieldPath:   "spec.compositionSelector.matchLabels.provider",
+					},
+				},
+			},
+		},
+	}
+
+	// Create XRD with enum for cloud parameter
+	xrd := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v2",
+			"kind":       "CompositeResourceDefinition",
+			"metadata": map[string]interface{}{
+				"name": "xrcommons.example.com",
+			},
+			"spec": map[string]interface{}{
+				"group": "example.com",
+				"names": map[string]interface{}{
+					"kind":   "XRCommon",
+					"plural": "xrcommons",
+				},
+				"versions": []interface{}{
+					map[string]interface{}{
+						"name":    "v1alpha1",
+						"served":  true,
+						"referenceable": true,
+						"schema": map[string]interface{}{
+							"openAPIV3Schema": map[string]interface{}{
+								"type": "object",
+								"properties": map[string]interface{}{
+									"spec": map[string]interface{}{
+										"type": "object",
+										"properties": map[string]interface{}{
+											"parameters": map[string]interface{}{
+												"type": "object",
+												"properties": map[string]interface{}{
+													"cloud": map[string]interface{}{
+														"type": "string",
+														"enum": []interface{}{"aws", "azure"},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	validator := NewCompositionSelectorValidator([]*ParsedComposition{awsComp, azureComp, parentComp})
+	validator.SetXRDSchemas([]*unstructured.Unstructured{xrd})
+	errors := validator.Validate()
+
+	// Should have NO errors and NO warnings about unused compositions
+	// because both aws and azure compositions are reachable via the enum values
+	for _, err := range errors {
+		if err.Severity == "error" {
+			t.Errorf("Unexpected error: %v", err)
+		}
+		if err.Severity == "warning" && strings.Contains(err.Message, "never selected") {
+			// This warning is now incorrect - the compositions ARE selected via dynamic patch
+			t.Errorf("Unexpected 'never selected' warning: %v", err)
+		}
+	}
+}
+
+func TestCompositionSelectorValidator_DynamicSelectorMissingEnum(t *testing.T) {
+	// Tests that we error when the dynamic selector enum value doesn't match any composition
+
+	// Only AWS composition exists
+	awsComp := &ParsedComposition{
+		Name:             "stamp-cluster-aws",
+		CompositeTypeRef: schema.GroupVersionKind{Group: "example.com", Version: "v1alpha1", Kind: "XRCluster"},
+		Labels: map[string]string{
+			"provider": "aws",
+		},
+	}
+
+	// Parent with dynamic selector that can select aws OR azure
+	parentComp := &ParsedComposition{
+		Name:             "stamp-common",
+		CompositeTypeRef: schema.GroupVersionKind{Group: "example.com", Version: "v1alpha1", Kind: "XRCommon"},
+		Resources: []ComposedResource{
+			{
+				Name: "cluster",
+				Base: &unstructured.Unstructured{
+					Object: map[string]interface{}{
+						"apiVersion": "example.com/v1alpha1",
+						"kind":       "XRCluster",
+					},
+				},
+				CompositionSelector: map[string]string{
+					"provider": "",
+				},
+				Patches: []Patch{
+					{
+						Type:          PatchTypeFromCompositeFieldPath,
+						FromFieldPath: "spec.parameters.cloud",
+						ToFieldPath:   "spec.compositionSelector.matchLabels.provider",
+					},
+				},
+			},
+		},
+	}
+
+	// XRD with enum that includes azure (but no azure composition exists!)
+	xrd := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v2",
+			"kind":       "CompositeResourceDefinition",
+			"metadata": map[string]interface{}{
+				"name": "xrcommons.example.com",
+			},
+			"spec": map[string]interface{}{
+				"group": "example.com",
+				"names": map[string]interface{}{
+					"kind":   "XRCommon",
+					"plural": "xrcommons",
+				},
+				"versions": []interface{}{
+					map[string]interface{}{
+						"name":    "v1alpha1",
+						"served":  true,
+						"referenceable": true,
+						"schema": map[string]interface{}{
+							"openAPIV3Schema": map[string]interface{}{
+								"type": "object",
+								"properties": map[string]interface{}{
+									"spec": map[string]interface{}{
+										"type": "object",
+										"properties": map[string]interface{}{
+											"parameters": map[string]interface{}{
+												"type": "object",
+												"properties": map[string]interface{}{
+													"cloud": map[string]interface{}{
+														"type": "string",
+														"enum": []interface{}{"aws", "azure"},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	validator := NewCompositionSelectorValidator([]*ParsedComposition{awsComp, parentComp})
+	validator.SetXRDSchemas([]*unstructured.Unstructured{xrd})
+	errors := validator.Validate()
+
+	// Should have an error because azure composition doesn't exist
+	foundAzureError := false
+	for _, err := range errors {
+		if err.Severity == "error" && strings.Contains(err.Message, "azure") {
+			foundAzureError = true
+		}
+	}
+
+	if !foundAzureError {
+		t.Error("Expected error about missing azure composition, got none")
+	}
+}
+
+func TestCompositionSelectorValidator_DynamicSelectorWithTransform(t *testing.T) {
+	// Tests that transforms on the patch are applied to enum values
+
+	// Composition with uppercase label
+	comp := &ParsedComposition{
+		Name:             "stamp-cluster-AWS",
+		CompositeTypeRef: schema.GroupVersionKind{Group: "example.com", Version: "v1alpha1", Kind: "XRCluster"},
+		Labels: map[string]string{
+			"provider": "AWS", // Uppercase!
+		},
+	}
+
+	// Parent with dynamic selector and map transform
+	parentComp := &ParsedComposition{
+		Name:             "stamp-common",
+		CompositeTypeRef: schema.GroupVersionKind{Group: "example.com", Version: "v1alpha1", Kind: "XRCommon"},
+		Resources: []ComposedResource{
+			{
+				Name: "cluster",
+				Base: &unstructured.Unstructured{
+					Object: map[string]interface{}{
+						"apiVersion": "example.com/v1alpha1",
+						"kind":       "XRCluster",
+					},
+				},
+				CompositionSelector: map[string]string{
+					"provider": "",
+				},
+				Patches: []Patch{
+					{
+						Type:          PatchTypeFromCompositeFieldPath,
+						FromFieldPath: "spec.parameters.cloud",
+						ToFieldPath:   "spec.compositionSelector.matchLabels.provider",
+						Transforms: []Transform{
+							{
+								Type: "map",
+								Map: map[string]string{
+									"aws": "AWS", // Transform to uppercase
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// XRD with lowercase enum
+	xrd := &unstructured.Unstructured{
+		Object: map[string]interface{}{
+			"apiVersion": "apiextensions.crossplane.io/v2",
+			"kind":       "CompositeResourceDefinition",
+			"metadata": map[string]interface{}{
+				"name": "xrcommons.example.com",
+			},
+			"spec": map[string]interface{}{
+				"group": "example.com",
+				"names": map[string]interface{}{
+					"kind":   "XRCommon",
+					"plural": "xrcommons",
+				},
+				"versions": []interface{}{
+					map[string]interface{}{
+						"name":    "v1alpha1",
+						"served":  true,
+						"referenceable": true,
+						"schema": map[string]interface{}{
+							"openAPIV3Schema": map[string]interface{}{
+								"type": "object",
+								"properties": map[string]interface{}{
+									"spec": map[string]interface{}{
+										"type": "object",
+										"properties": map[string]interface{}{
+											"parameters": map[string]interface{}{
+												"type": "object",
+												"properties": map[string]interface{}{
+													"cloud": map[string]interface{}{
+														"type": "string",
+														"enum": []interface{}{"aws"}, // lowercase
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	validator := NewCompositionSelectorValidator([]*ParsedComposition{comp, parentComp})
+	validator.SetXRDSchemas([]*unstructured.Unstructured{xrd})
+	errors := validator.Validate()
+
+	// Should have no errors - aws maps to AWS which matches the composition
+	for _, err := range errors {
+		if err.Severity == "error" {
+			t.Errorf("Unexpected error: %v", err)
+		}
+	}
+}
+
+func TestCompositionSelectorValidator_ExtractSelectorLabelKey(t *testing.T) {
+	validator := NewCompositionSelectorValidator(nil)
+
+	tests := []struct {
+		toFieldPath string
+		wantKey     string
+	}{
+		{
+			toFieldPath: "spec.compositionSelector.matchLabels.provider",
+			wantKey:     "provider",
+		},
+		{
+			toFieldPath: "spec.crossplane.compositionSelector.matchLabels.provider",
+			wantKey:     "provider",
+		},
+		{
+			toFieldPath: "spec.compositionSelector.matchLabels.region",
+			wantKey:     "region",
+		},
+		{
+			toFieldPath: "spec.forProvider.region", // Not a selector
+			wantKey:     "",
+		},
+		{
+			toFieldPath: "spec.parameters.cloud", // Not a selector
+			wantKey:     "",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.toFieldPath, func(t *testing.T) {
+			got := validator.extractSelectorLabelKey(tc.toFieldPath)
+			if got != tc.wantKey {
+				t.Errorf("extractSelectorLabelKey(%q) = %q, want %q", tc.toFieldPath, got, tc.wantKey)
+			}
+		})
+	}
+}
+
+func TestCompositionSelectorValidator_NoXRDSchemaStillWorks(t *testing.T) {
+	// When no XRD schema is provided, dynamic selectors can't be traced
+	// but static selectors should still work
+
+	awsComp := &ParsedComposition{
+		Name:             "stamp-cluster-aws",
+		CompositeTypeRef: schema.GroupVersionKind{Group: "example.com", Version: "v1alpha1", Kind: "XRCluster"},
+		Labels: map[string]string{
+			"provider": "aws",
+		},
+	}
+
+	// Static selector (no patch)
+	parentComp := &ParsedComposition{
+		Name:             "stamp-common",
+		CompositeTypeRef: schema.GroupVersionKind{Group: "example.com", Version: "v1alpha1", Kind: "XRCommon"},
+		Resources: []ComposedResource{
+			{
+				Name: "cluster",
+				Base: &unstructured.Unstructured{
+					Object: map[string]interface{}{
+						"apiVersion": "example.com/v1alpha1",
+						"kind":       "XRCluster",
+					},
+				},
+				CompositionSelector: map[string]string{
+					"provider": "aws",
+				},
+			},
+		},
+	}
+
+	validator := NewCompositionSelectorValidator([]*ParsedComposition{awsComp, parentComp})
+	// No XRD schema set!
+	errors := validator.Validate()
+
+	// Should work fine with static selector
+	for _, err := range errors {
+		if err.Severity == "error" {
+			t.Errorf("Unexpected error: %v", err)
+		}
+	}
+}
+
+// =============================================================================
 // Patch Type Mismatch Validation Tests
 // =============================================================================
 

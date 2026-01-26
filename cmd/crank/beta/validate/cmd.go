@@ -540,7 +540,11 @@ func (c *Cmd) Run(k *kong.Context, _ logging.Logger) error {
 		}
 
 		// 1d. Composition Selector Validation
+		// Extract XRDs for schema lookup (enum values)
+		_, xrdsForSelector := ExtractCompositionsAndXRDs(extensions)
+
 		selectorValidator := NewCompositionSelectorValidator(parser.GetCompositions())
+		selectorValidator.SetXRDSchemas(xrdsForSelector) // Enable dynamic selector patch tracing
 		selectorErrors := selectorValidator.Validate()
 
 		// Report selector issues
