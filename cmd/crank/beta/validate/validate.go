@@ -148,9 +148,13 @@ func SchemaValidationWithPatches(ctx context.Context, resources []*unstructured.
 			}
 		}
 
-		// Get source location for better error messages
+		// Get source location for better error messages (before stripping annotations)
 		sourceFile := load.GetSourceFile(r)
 		sourceLine := load.GetSourceLine(r)
+
+		// Strip internal annotations before validation to avoid false positives
+		// The loader adds crossplane.io/source-file and crossplane.io/source-line for tracking
+		stripInternalAnnotations(r)
 
 		// Get base resource name from annotation (if this is a base resource extracted from composition)
 		baseResourceName := ""
@@ -361,4 +365,36 @@ func applyDefaults(resource *unstructured.Unstructured, gvk runtimeschema.GroupV
 	structuraldefaulting.Default(obj, structural)
 
 	return nil
+}
+
+// stripInternalAnnotations removes internal annotations that are added by the loader
+// for tracking purposes. These annotations should not be validated against the schema.
+func stripInternalAnnotations(resource *unstructured.Unstructured) {
+	annotations := resource.GetAnnotations()
+	if annotations == nil {
+		return
+	}
+
+	// List of internal annotations to strip
+	internalAnnotations := []string{
+		"crossplane.io/source-file",
+		"crossplane.io/source-line",
+		"crossplane.io/base-resource-name",
+	}
+
+	modified := false
+	for _, key := range internalAnnotations {
+		if _, exists := annotations[key]; exists {
+			delete(annotations, key)
+			modified = true
+		}
+	}
+
+	if modified {
+		if len(annotations) == 0 {
+			resource.SetAnnotations(nil)
+		} else {
+			resource.SetAnnotations(annotations)
+		}
+	}
 }

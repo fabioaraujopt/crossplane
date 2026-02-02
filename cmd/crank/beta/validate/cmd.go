@@ -325,7 +325,7 @@ func (c *Cmd) Run(k *kong.Context, _ logging.Logger) error {
 			sourceCRDs, fetchErrs = sourceFetcher.PrefetchAllFromSources(context.Background(), sources)
 		} else {
 			// Discover all GVKs and filter out user XRDs (they come from XRD files)
-			allGVKs := discoverRequiredGVKs(extensions)
+			allGVKs := discoverRequiredGVKs(extensions, resources)
 			userXRDGroups := getUserXRDGroups(extensions)
 			requiredGVKs := filterExternalGVKs(allGVKs, userXRDGroups)
 
@@ -748,10 +748,22 @@ func (c *Cmd) Run(k *kong.Context, _ logging.Logger) error {
 	return nil
 }
 
-// discoverRequiredGVKs discovers all GVKs that need schemas from compositions.
-// Returns all GVKs found in base resources AND the extensions themselves.
-func discoverRequiredGVKs(extensions []*unstructured.Unstructured) map[string]bool {
+// discoverRequiredGVKs discovers all GVKs that need schemas from compositions and resources.
+// Returns all GVKs found in base resources, the extensions themselves, and standalone resources.
+func discoverRequiredGVKs(extensions, resources []*unstructured.Unstructured) map[string]bool {
 	gvks := make(map[string]bool)
+
+	// Add GVKs from resources being validated (e.g., ValidatingAdmissionPolicy, etc.)
+	for _, obj := range resources {
+		if obj.GetAPIVersion() == "" && obj.GetKind() == "" {
+			continue
+		}
+		objGVK := fmt.Sprintf("%s, Kind=%s", obj.GetAPIVersion(), obj.GetKind())
+		if objGVK == ", Kind=" || objGVK == "/, Kind=" {
+			continue
+		}
+		gvks[objGVK] = true
+	}
 
 	for _, obj := range extensions {
 		// Skip empty documents (can happen from comment blocks before ---)
