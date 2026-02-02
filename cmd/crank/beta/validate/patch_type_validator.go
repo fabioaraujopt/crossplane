@@ -643,15 +643,15 @@ func validateJSONTemplate(template string, variableCount int) error {
 }
 
 // ValidStringTransformTypes are the valid types for string transforms.
-// See: https://docs.crossplane.io/latest/concepts/patch-and-transform/#string-transforms
+// See: https://pkg.go.dev/github.com/crossplane-contrib/function-patch-and-transform/input/v1beta1#StringTransformType
 var ValidStringTransformTypes = []string{
-	"Format",
-	"Convert",
-	"Regexp",
-	"Trim",
-	"TrimPrefix",
-	"TrimSuffix",
-	"Join",
+	"Format",     // Default - formats using Go fmt
+	"Convert",    // Converts string (ToUpper, ToLower, etc.)
+	"TrimPrefix", // Trims prefix from string
+	"TrimSuffix", // Trims suffix from string
+	"Regexp",     // Regex extraction
+	"Join",       // Joins array into string (v0.7.0+)
+	"Replace",    // Search/replace (v0.7.0+)
 }
 
 // ValidStringConvertTypes are the valid convert types for string transforms.
