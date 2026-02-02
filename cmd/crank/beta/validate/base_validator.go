@@ -17,6 +17,7 @@ limitations under the License.
 package validate
 
 import (
+	"fmt"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -135,6 +136,25 @@ func FilterRequiredFieldErrors(errors field.ErrorList, resourceName string, coll
 	}
 
 	return filtered
+}
+
+// DebugPatchedFields returns a string representation of all patched fields for debugging.
+func (c *PatchedFieldsCollector) DebugPatchedFields() string {
+	if c == nil {
+		return "PatchedFieldsCollector is nil"
+	}
+	var result strings.Builder
+	result.WriteString("PatchedFieldsCollector contents:\n")
+	for resourceName, fields := range c.patchedFields {
+		result.WriteString(fmt.Sprintf("  Resource '%s': %d fields\n", resourceName, len(fields)))
+		for field := range fields {
+			result.WriteString(fmt.Sprintf("    - %s\n", field))
+		}
+	}
+	if len(c.patchedFields) == 0 {
+		result.WriteString("  (empty - no patches collected)\n")
+	}
+	return result.String()
 }
 
 // IsCELRequiredError checks if a CEL error is about a required field.

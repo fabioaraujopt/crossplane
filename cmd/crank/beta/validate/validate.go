@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"strings"
 
 	ext "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions"
@@ -197,6 +198,9 @@ func SchemaValidationWithPatches(ctx context.Context, resources []*unstructured.
 			baseResourceName = annotations["crossplane.io/base-resource-name"]
 		}
 
+		// DEBUG: Log when we have a base resource with Required errors
+		debugRequiredFiltering := os.Getenv("DEBUG_REQUIRED_FILTERING") == "1"
+
 		rf := 0
 		for _, v := range sv {
 			// Strip internal tracking annotations before validation to avoid false positives
@@ -210,7 +214,32 @@ func SchemaValidationWithPatches(ctx context.Context, resources []*unstructured.
 
 			// Filter out required field errors if this is a base resource with patches
 			if patchCollector != nil && baseResourceName != "" {
+				beforeCount := len(allErrors)
 				allErrors = FilterRequiredFieldErrors(allErrors, baseResourceName, patchCollector)
+				if debugRequiredFiltering {
+					if beforeCount != len(allErrors) {
+						fmt.Fprintf(w, "[DEBUG] Filtered %d Required errors for resource '%s' (%s)\n", beforeCount-len(allErrors), baseResourceName, r.GroupVersionKind().String())
+					} else {
+						// Check if there were Required errors that weren't filtered
+						for _, e := range allErrors {
+							if e.Type == field.ErrorTypeRequired {
+								fieldPath := strings.TrimPrefix(e.Field, ".")
+								isPatched := patchCollector.IsFieldPatched(baseResourceName, fieldPath)
+								fmt.Fprintf(w, "[DEBUG] Required error NOT filtered: resource='%s' field='%s' isPatched=%v\n", baseResourceName, fieldPath, isPatched)
+							}
+						}
+					}
+				}
+			} else if baseResourceName == "" {
+				// Check if this resource has Required errors that could have been filtered
+				for _, e := range allErrors {
+					if e.Type == field.ErrorTypeRequired {
+						if debugRequiredFiltering {
+							fmt.Fprintf(w, "[DEBUG] Resource %s has Required errors but no baseResourceName annotation (annotations: %v)\n", r.GroupVersionKind().String(), r.GetAnnotations())
+						}
+						break
+					}
+				}
 			}
 
 			for _, e := range allErrors {

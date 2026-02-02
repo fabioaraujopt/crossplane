@@ -61,6 +61,7 @@ type Cmd struct {
 	ShowDetails               bool `default:"true"  help:"Show detailed error messages (invalid patches, unused params per composition)."`
 	AutoDiscoverProviders     bool `default:"false" help:"Automatically discover and download provider schemas based on resources used in compositions."`
 	OnlyInvalid               bool `default:"false" help:"Only show invalid/error results, hide all success output."`
+	DebugPatches              bool `default:"false" help:"Show debug output for patch collection (helps diagnose false positive Required value errors)."`
 
 	// Deletion safety validation flags
 	ValidateDeletionSafety bool `default:"true"  help:"Validate deletion safety patterns (rollbackLimit, IAM Usage, label matching)."`
@@ -462,8 +463,19 @@ func (c *Cmd) Run(k *kong.Context, _ logging.Logger) error {
 			return errors.Wrap(err, errWriteOutput)
 		}
 	}
-	for _, comp := range compParser.GetCompositions() {
+	compositions := compParser.GetCompositions()
+	for _, comp := range compositions {
 		patchCollector.CollectFromComposition(comp)
+	}
+
+	// Debug: show how many compositions and patches were collected
+	if c.DebugPatches {
+		if _, err := fmt.Fprintf(k.Stdout, "\n[DEBUG] Parsed %d compositions for patch filtering\n", len(compositions)); err != nil {
+			return errors.Wrap(err, errWriteOutput)
+		}
+		if _, err := fmt.Fprintf(k.Stdout, "%s\n", patchCollector.DebugPatchedFields()); err != nil {
+			return errors.Wrap(err, errWriteOutput)
+		}
 	}
 
 	// 1. Schema Validation (original validation)
