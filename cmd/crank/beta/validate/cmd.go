@@ -456,10 +456,14 @@ func (c *Cmd) Run(k *kong.Context, _ logging.Logger) error {
 	patchCollector := NewPatchedFieldsCollector()
 	compParser := NewCompositionParser()
 	allObjects := append(extensions, resources...)
-	if err := compParser.Parse(allObjects); err == nil {
-		for _, comp := range compParser.GetCompositions() {
-			patchCollector.CollectFromComposition(comp)
+	if err := compParser.Parse(allObjects); err != nil {
+		// Log parsing errors but continue - patch filtering is best-effort
+		if _, err := fmt.Fprintf(k.Stdout, "[!] Warning: failed to parse compositions for patch filtering: %v\n", err); err != nil {
+			return errors.Wrap(err, errWriteOutput)
 		}
+	}
+	for _, comp := range compParser.GetCompositions() {
+		patchCollector.CollectFromComposition(comp)
 	}
 
 	// 1. Schema Validation (original validation)
