@@ -99,8 +99,9 @@ type ConvertTransform struct {
 
 // StringTransform applies string operations.
 type StringTransform struct {
-	Type   string `json:"type,omitempty"`
-	Format string `json:"fmt,omitempty"`
+	Type    string `json:"type,omitempty"`
+	Format  string `json:"fmt,omitempty"`
+	Convert string `json:"convert,omitempty"` // For type: Convert - e.g., ToUpper, ToLower, ToBase64, etc.
 }
 
 // MathTransform applies math operations.
@@ -521,8 +522,9 @@ func (p *CompositionParser) parsePatch(patchMap map[string]interface{}) Patch {
 				// Parse string transform
 				if str, ok := tMap["string"].(map[string]interface{}); ok {
 					transform.String = &StringTransform{
-						Type:   getStringField(str, "type"),
-						Format: getStringField(str, "fmt"),
+						Type:    getStringField(str, "type"),
+						Format:  getStringField(str, "fmt"),
+						Convert: getStringField(str, "convert"),
 					}
 				}
 

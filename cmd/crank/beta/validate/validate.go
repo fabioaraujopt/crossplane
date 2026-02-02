@@ -187,7 +187,7 @@ func SchemaValidationWithPatches(ctx context.Context, resources []*unstructured.
 			}
 		}
 
-		// Get source location for better error messages
+		// Get source location for better error messages (before stripping annotations)
 		sourceFile := load.GetSourceFile(r)
 		sourceLine := load.GetSourceLine(r)
 

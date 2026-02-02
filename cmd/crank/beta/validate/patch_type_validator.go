@@ -188,6 +188,9 @@ func (v *PatchTypeValidator) validatePatch(compName string, patchInfo PatchInfo)
 		allResults = append(allResults, v.validateToEnvironmentFieldPath(compName, patchInfo)...)
 	}
 
+	// Validate transforms (applies to all patch types)
+	allResults = append(allResults, v.validateTransforms(compName, patchInfo)...)
+
 	// Separate errors and warnings based on Severity
 	var errors, warnings []PatchTypeValidationError
 	for _, result := range allResults {
@@ -735,4 +738,102 @@ func validateJSONTemplate(template string, variableCount int) error {
 	}
 
 	return nil
+}
+
+// ValidStringTransformTypes are the valid types for string transforms.
+// See: https://pkg.go.dev/github.com/crossplane-contrib/function-patch-and-transform/input/v1beta1#StringTransformType
+var ValidStringTransformTypes = []string{
+	"Format",     // Default - formats using Go fmt
+	"Convert",    // Converts string (ToUpper, ToLower, etc.)
+	"TrimPrefix", // Trims prefix from string
+	"TrimSuffix", // Trims suffix from string
+	"Regexp",     // Regex extraction
+	"Join",       // Joins array into string (v0.7.0+)
+	"Replace",    // Search/replace (v0.7.0+)
+}
+
+// ValidStringConvertTypes are the valid convert types for string transforms.
+// See: https://docs.crossplane.io/latest/concepts/patch-and-transform/#string-transforms
+var ValidStringConvertTypes = []string{
+	"ToUpper",
+	"ToLower",
+	"ToBase64",
+	"FromBase64",
+	"ToJson",
+	"ToSha1",
+	"ToSha256",
+	"ToSha512",
+	"ToAdler32",
+}
+
+// ValidTransformTypes are the valid top-level transform types.
+var ValidTransformTypes = []string{
+	"convert",
+	"map",
+	"match",
+	"math",
+	"string",
+}
+
+// validateTransforms validates all transforms in a patch.
+func (v *PatchTypeValidator) validateTransforms(compName string, patchInfo PatchInfo) []PatchTypeValidationError {
+	var errors []PatchTypeValidationError
+	patch := patchInfo.Patch
+
+	for i, transform := range patch.Transforms {
+		// Validate top-level transform type
+		if transform.Type != "" && !contains(ValidTransformTypes, transform.Type) {
+			errors = append(errors, PatchTypeValidationError{
+				CompositionName: compName,
+				ResourceName:    patchInfo.ResourceName,
+				PatchIndex:      patchInfo.PatchIndex,
+				PatchType:       string(patch.Type),
+				SourceFile:      patchInfo.SourceFile,
+				SourceLine:      patchInfo.SourceLine,
+				Message: fmt.Sprintf(
+					"composition '%s' resource '%s' patch[%d] transform[%d]: invalid transform type '%s' - valid types are: %v",
+					compName, patchInfo.ResourceName, patchInfo.PatchIndex, i, transform.Type, ValidTransformTypes),
+				Severity: "error",
+			})
+		}
+
+		// Validate string transform
+		if transform.Type == "string" && transform.String != nil {
+			// Validate string transform type (Format, Convert, Regexp, etc.)
+			if transform.String.Type != "" && !contains(ValidStringTransformTypes, transform.String.Type) {
+				errors = append(errors, PatchTypeValidationError{
+					CompositionName: compName,
+					ResourceName:    patchInfo.ResourceName,
+					PatchIndex:      patchInfo.PatchIndex,
+					PatchType:       string(patch.Type),
+					SourceFile:      patchInfo.SourceFile,
+					SourceLine:      patchInfo.SourceLine,
+					Message: fmt.Sprintf(
+						"composition '%s' resource '%s' patch[%d] transform[%d]: invalid string transform type '%s' - valid types are: %v",
+						compName, patchInfo.ResourceName, patchInfo.PatchIndex, i, transform.String.Type, ValidStringTransformTypes),
+					Severity: "error",
+				})
+			}
+
+			// Validate string convert types (ToUpper, ToLower, FromBase64, etc.)
+			if transform.String.Type == "Convert" && transform.String.Convert != "" {
+				if !contains(ValidStringConvertTypes, transform.String.Convert) {
+					errors = append(errors, PatchTypeValidationError{
+						CompositionName: compName,
+						ResourceName:    patchInfo.ResourceName,
+						PatchIndex:      patchInfo.PatchIndex,
+						PatchType:       string(patch.Type),
+						SourceFile:      patchInfo.SourceFile,
+						SourceLine:      patchInfo.SourceLine,
+						Message: fmt.Sprintf(
+							"composition '%s' resource '%s' patch[%d] transform[%d]: invalid string convert type '%s' - valid types are: %v",
+							compName, patchInfo.ResourceName, patchInfo.PatchIndex, i, transform.String.Convert, ValidStringConvertTypes),
+						Severity: "error",
+					})
+				}
+			}
+		}
+	}
+
+	return errors
 }
