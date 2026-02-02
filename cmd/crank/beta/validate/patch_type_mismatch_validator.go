@@ -252,6 +252,7 @@ func (v *PatchTypeMismatchValidator) getFieldType(schema *extv1.JSONSchemaProps,
 }
 
 // applyTransformTypes determines the output type after transforms.
+// It processes the transform chain sequentially, updating the type at each step.
 func (v *PatchTypeMismatchValidator) applyTransformTypes(inputType string, transforms []Transform) string {
 	currentType := inputType
 
@@ -260,7 +261,8 @@ func (v *PatchTypeMismatchValidator) applyTransformTypes(inputType string, trans
 		case "convert":
 			// Convert transform explicitly changes type
 			if transform.Convert != nil && transform.Convert.ToType != "" {
-				currentType = transform.Convert.ToType
+				// Normalize transform types to OpenAPI schema types
+				currentType = normalizeTransformType(transform.Convert.ToType)
 			}
 		case "string":
 			// String transforms output string
@@ -271,19 +273,44 @@ func (v *PatchTypeMismatchValidator) applyTransformTypes(inputType string, trans
 				// Keep the same type
 			}
 		case "map":
-			// Map transform - output depends on map values
-			// Usually string → string, but can't know for sure
-			// Keep current type as approximation
+			// Map transform: string input → value from map (can be any JSON type)
+			// The map values in YAML like "false" or "0" are strings, so output is typically string.
+			// We can't statically determine the exact output type from map values,
+			// so we assume string output (most common case for chained map → convert).
+			// The subsequent convert transform will set the final type.
+			currentType = "string"
 		case "match":
-			// Match transform - similar to map
+			// Match transform - similar to map, output depends on result values
+			// Assume string output for same reason as map
+			currentType = "string"
 		}
 	}
 
 	return currentType
 }
 
+// normalizeTransformType converts function-patch-and-transform type names to OpenAPI schema type names.
+// Transform types: bool, int, int64, float64, string, object, array
+// OpenAPI types:   boolean, integer, number, string, object, array
+func normalizeTransformType(transformType string) string {
+	switch transformType {
+	case "bool":
+		return "boolean"
+	case "int", "int64":
+		return "integer"
+	case "float64":
+		return "number"
+	default:
+		return transformType
+	}
+}
+
 // typesCompatible checks if two types are compatible.
 func (v *PatchTypeMismatchValidator) typesCompatible(source, target string) bool {
+	// Normalize both types to OpenAPI schema types for comparison
+	source = normalizeTransformType(source)
+	target = normalizeTransformType(target)
+
 	// Exact match
 	if source == target {
 		return true

@@ -5064,6 +5064,93 @@ func TestPatchTypeMismatchValidator_WithConvertTransform(t *testing.T) {
 	}
 }
 
+func TestPatchTypeMismatchValidator_MapThenConvertTransform(t *testing.T) {
+	navigator := &SchemaNavigator{
+		schemas: make(map[schema.GroupVersionKind]*extv1.JSONSchemaProps),
+	}
+
+	// XR with string environment parameter (values: "dev", "prod")
+	xrGVK := schema.GroupVersionKind{Group: "test.io", Version: "v1", Kind: "TestXR"}
+	navigator.schemas[xrGVK] = &extv1.JSONSchemaProps{
+		Type: "object",
+		Properties: map[string]extv1.JSONSchemaProps{
+			"spec": {
+				Type: "object",
+				Properties: map[string]extv1.JSONSchemaProps{
+					"parameters": {
+						Type: "object",
+						Properties: map[string]extv1.JSONSchemaProps{
+							"environment": {Type: "string"}, // "dev" or "prod"
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Target resource with boolean field
+	targetGVK := schema.GroupVersionKind{Group: "aws.io", Version: "v1", Kind: "DBCluster"}
+	navigator.schemas[targetGVK] = &extv1.JSONSchemaProps{
+		Type: "object",
+		Properties: map[string]extv1.JSONSchemaProps{
+			"spec": {
+				Type: "object",
+				Properties: map[string]extv1.JSONSchemaProps{
+					"forProvider": {
+						Type: "object",
+						Properties: map[string]extv1.JSONSchemaProps{
+							"performanceInsightsEnabled": {Type: "boolean"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	compositions := []*ParsedComposition{
+		{
+			Name:             "test-comp",
+			CompositeTypeRef: xrGVK,
+			Resources: []ComposedResource{
+				{
+					Name:    "db",
+					BaseGVK: targetGVK,
+					Patches: []Patch{
+						{
+							Type:          PatchTypeFromCompositeFieldPath,
+							FromFieldPath: "spec.parameters.environment",
+							ToFieldPath:   "spec.forProvider.performanceInsightsEnabled",
+							Transforms: []Transform{
+								{
+									Type: "map",
+									// Map "dev" → "false", "prod" → "true" (strings)
+								},
+								{
+									Type: "convert",
+									Convert: &ConvertTransform{
+										ToType: "bool", // Note: uses "bool" not "boolean"
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	validator := NewPatchTypeMismatchValidator(navigator, compositions)
+	errors := validator.Validate()
+
+	// Should NOT error because:
+	// 1. string → map → string ("false"/"true")
+	// 2. string → convert(bool) → boolean
+	// 3. boolean matches target boolean
+	if len(errors) > 0 {
+		t.Errorf("Expected no errors (map → convert transform chain should work), got: %v", errors)
+	}
+}
+
 func TestPatchTypeMismatchValidator_CompatibleTypes(t *testing.T) {
 	navigator := &SchemaNavigator{
 		schemas: make(map[schema.GroupVersionKind]*extv1.JSONSchemaProps),
@@ -5134,7 +5221,7 @@ func TestPatchTypeMismatchValidator_StatusTypeMismatch(t *testing.T) {
 		schemas: make(map[schema.GroupVersionKind]*extv1.JSONSchemaProps),
 	}
 
-	// Parent XR schema with string status field
+	// Parent XR schema with integer status field
 	parentGVK := schema.GroupVersionKind{Group: "test.io", Version: "v1", Kind: "ParentXR"}
 	navigator.schemas[parentGVK] = &extv1.JSONSchemaProps{
 		Type: "object",
@@ -5142,13 +5229,13 @@ func TestPatchTypeMismatchValidator_StatusTypeMismatch(t *testing.T) {
 			"status": {
 				Type: "object",
 				Properties: map[string]extv1.JSONSchemaProps{
-					"count": {Type: "string"}, // String in parent
+					"data": {Type: "integer"}, // Integer in parent
 				},
 			},
 		},
 	}
 
-	// Child XR schema with integer status field
+	// Child XR schema with object status field (incompatible with integer!)
 	childGVK := schema.GroupVersionKind{Group: "test.io", Version: "v1", Kind: "ChildXR"}
 	navigator.schemas[childGVK] = &extv1.JSONSchemaProps{
 		Type: "object",
@@ -5156,7 +5243,7 @@ func TestPatchTypeMismatchValidator_StatusTypeMismatch(t *testing.T) {
 			"status": {
 				Type: "object",
 				Properties: map[string]extv1.JSONSchemaProps{
-					"count": {Type: "integer"}, // Integer in child!
+					"data": {Type: "object"}, // Object in child - incompatible with integer!
 				},
 			},
 		},
@@ -5179,8 +5266,8 @@ func TestPatchTypeMismatchValidator_StatusTypeMismatch(t *testing.T) {
 					PatchIndex:      0,
 					Patch: Patch{
 						Type:          PatchTypeToCompositeFieldPath,
-						FromFieldPath: "status.count", // Read integer from child
-						ToFieldPath:   "status.count", // Write to string in parent
+						FromFieldPath: "status.data", // Read object from child
+						ToFieldPath:   "status.data", // Write to integer in parent - MISMATCH!
 					},
 					SourceGVK: childGVK,
 					TargetGVK: parentGVK,
