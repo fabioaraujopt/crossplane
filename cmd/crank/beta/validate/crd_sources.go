@@ -1567,7 +1567,7 @@ func convertJSONSchemaToOpenAPIWithResolver(schema map[string]interface{}, resol
 		// This allows unknown types to pass validation
 		return &extv1.JSONSchemaProps{
 			Type:                   "object",
-			XPreserveUnknownFields: boolPtr(true),
+			XPreserveUnknownFields: ptrBool(true),
 		}
 	}
 
@@ -1602,11 +1602,11 @@ func convertJSONSchemaToOpenAPIWithResolver(schema map[string]interface{}, resol
 				// This prevents false positives for internal annotations like crossplane.io/source-file
 				if name == "metadata" && converted.Properties != nil {
 					if annots, ok := converted.Properties["annotations"]; ok {
-						annots.XPreserveUnknownFields = boolPtr(true)
+						annots.XPreserveUnknownFields = ptrBool(true)
 						converted.Properties["annotations"] = annots
 					}
 					if labels, ok := converted.Properties["labels"]; ok {
-						labels.XPreserveUnknownFields = boolPtr(true)
+						labels.XPreserveUnknownFields = ptrBool(true)
 						converted.Properties["labels"] = labels
 					}
 				}
@@ -1654,8 +1654,8 @@ func convertJSONSchemaToOpenAPIWithResolver(schema map[string]interface{}, resol
 	return result
 }
 
-// boolPtr returns a pointer to a bool value.
-func boolPtr(b bool) *bool {
+// ptrBool returns a pointer to a bool value.
+func ptrBool(b bool) *bool {
 	return &b
 }
 

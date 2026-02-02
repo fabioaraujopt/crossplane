@@ -479,7 +479,7 @@ func TestUnusedParameterDetection(t *testing.T) {
 func TestDiscoverRequiredGVKs(t *testing.T) {
 	composition := createCompositionWithMultipleResources()
 
-	gvks := discoverRequiredGVKs([]*unstructured.Unstructured{composition})
+	gvks := discoverRequiredGVKs([]*unstructured.Unstructured{composition}, nil)
 
 	expectedGVKs := []string{
 		"apiextensions.crossplane.io/v1, Kind=Composition", // The composition itself
@@ -498,7 +498,7 @@ func TestDiscoverRequiredGVKs(t *testing.T) {
 func TestDiscoverNestedGVKs(t *testing.T) {
 	composition := createCompositionWithNestedManifest()
 
-	gvks := discoverRequiredGVKs([]*unstructured.Unstructured{composition})
+	gvks := discoverRequiredGVKs([]*unstructured.Unstructured{composition}, nil)
 
 	// Should discover the nested manifest GVK
 	nestedGVK := "karpenter.sh/v1, Kind=NodePool"
