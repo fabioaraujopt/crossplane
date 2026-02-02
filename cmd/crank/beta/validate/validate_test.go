@@ -1104,7 +1104,7 @@ func TestValidateResources(t *testing.T) {
 								"name": "test",
 							},
 							"spec": map[string]interface{}{
-								"replicas": 1,
+								"replicas": int64(1),
 							},
 						},
 					},
@@ -1126,9 +1126,9 @@ func TestValidateResources(t *testing.T) {
 								"name": "test",
 							},
 							"spec": map[string]interface{}{
-								"replicas":    5,
-								"minReplicas": 3,
-								"maxReplicas": 10,
+								"replicas":    int64(5),
+								"minReplicas": int64(3),
+								"maxReplicas": int64(10),
 							},
 						},
 					},
@@ -1150,7 +1150,7 @@ func TestValidateResources(t *testing.T) {
 								"name": "test",
 							},
 							"spec": map[string]interface{}{
-								"replicas": 1,
+								"replicas": int64(1),
 							},
 						},
 					},
@@ -1173,7 +1173,7 @@ func TestValidateResources(t *testing.T) {
 								"name": "test",
 							},
 							"spec": map[string]interface{}{
-								"replicas": 1,
+								"replicas": int64(1),
 							},
 						},
 					},
@@ -1222,9 +1222,9 @@ func TestValidateResources(t *testing.T) {
 								"name": "test",
 							},
 							"spec": map[string]interface{}{
-								"replicas":    50,
-								"minReplicas": 3,
-								"maxReplicas": 10,
+								"replicas":    int64(50),
+								"minReplicas": int64(3),
+								"maxReplicas": int64(10),
 							},
 						},
 					},
@@ -1249,7 +1249,7 @@ func TestValidateResources(t *testing.T) {
 								"name": "test",
 							},
 							"spec": map[string]interface{}{
-								"replicas": 1,
+								"replicas": int64(1),
 							},
 						},
 					},
@@ -1295,7 +1295,7 @@ func TestValidateUnknownFields(t *testing.T) {
 						"name": "test-instance",
 					},
 					"spec": map[string]interface{}{
-						"replicas":     3,
+						"replicas":     int64(3),
 						"unknownField": "should fail", // This field is not defined in the CRD schema
 					},
 				},
@@ -1327,7 +1327,7 @@ func TestValidateUnknownFields(t *testing.T) {
 						"name": "test-instance",
 					},
 					"spec": map[string]interface{}{
-						"replicas": 3, // No unknown fields
+						"replicas": int64(3), // No unknown fields
 					},
 				},
 				sch: &schema.Structural{
@@ -1383,7 +1383,7 @@ func TestApplyDefaults(t *testing.T) {
 						"apiVersion": "test.org/v1alpha1",
 						"kind":       "Test",
 						"spec": map[string]interface{}{
-							"replicas": 3,
+							"replicas": int64(3),
 						},
 					},
 				},
@@ -1400,7 +1400,7 @@ func TestApplyDefaults(t *testing.T) {
 						"apiVersion": "test.org/v1alpha1",
 						"kind":       "Test",
 						"spec": map[string]interface{}{
-							"replicas": 3,
+							"replicas": int64(3),
 						},
 					},
 				},
@@ -1415,7 +1415,7 @@ func TestApplyDefaults(t *testing.T) {
 						"apiVersion": "test.org/v1alpha1",
 						"kind":       "Test",
 						"spec": map[string]interface{}{
-							"replicas": 3,
+							"replicas": int64(3),
 						},
 					},
 				},
@@ -1465,7 +1465,7 @@ func TestApplyDefaults(t *testing.T) {
 						"apiVersion": "test.org/v1alpha1",
 						"kind":       "Test",
 						"spec": map[string]interface{}{
-							"replicas":       3,
+							"replicas":       int64(3),
 							"deletionPolicy": "Delete",
 						},
 					},
@@ -1481,7 +1481,7 @@ func TestApplyDefaults(t *testing.T) {
 						"apiVersion": "test.org/v1alpha1",
 						"kind":       "Test",
 						"spec": map[string]interface{}{
-							"replicas":       3,
+							"replicas":       int64(3),
 							"deletionPolicy": "Retain",
 						},
 					},
@@ -1532,7 +1532,7 @@ func TestApplyDefaults(t *testing.T) {
 						"apiVersion": "test.org/v1alpha1",
 						"kind":       "Test",
 						"spec": map[string]interface{}{
-							"replicas":       3,
+							"replicas":       int64(3),
 							"deletionPolicy": "Retain",
 						},
 					},

@@ -822,12 +822,10 @@ func (f *CRDSourceFetcher) FetchFromSources(ctx context.Context, sources []CRDSo
 	// Collect results and merge found GVKs
 	var allCRDs []*extv1.CustomResourceDefinition
 	foundGVKs := make(map[string]bool)
-	var fetchErrors []string
 
 	for result := range results {
 		if result.err != nil {
 			errMsg := fmt.Sprintf("%s: %v", result.source.Location, result.err)
-			fetchErrors = append(fetchErrors, errMsg)
 			if _, err := fmt.Fprintf(f.writer, "    ⚠️  %s\n", errMsg); err != nil {
 				return nil, errors.Wrap(err, "cannot write output")
 			}
@@ -1539,12 +1537,6 @@ func schemaHasRefs(schema map[string]interface{}) bool {
 		}
 	}
 	return false
-}
-
-// convertJSONSchemaToOpenAPI converts a JSON Schema to OpenAPI v3 schema format.
-// This is a wrapper that uses an empty resolver for backward compatibility.
-func convertJSONSchemaToOpenAPI(schema map[string]interface{}) *extv1.JSONSchemaProps {
-	return convertJSONSchemaToOpenAPIWithResolver(schema, nil, 0)
 }
 
 // convertJSONSchemaToOpenAPIWithResolver converts a JSON Schema to OpenAPI v3 schema format,

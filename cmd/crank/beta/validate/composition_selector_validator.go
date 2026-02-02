@@ -440,13 +440,11 @@ func (v *CompositionSelectorValidator) applyTransforms(value string, transforms 
 // Input: {"provider": ["aws", "azure"], "production": ["true", "false"]}
 // Output: [{"provider": "aws", "production": "true"}, {"provider": "aws", "production": "false"}, ...]
 func (v *CompositionSelectorValidator) generateLabelCombinations(dynamicLabels map[string][]string) []map[string]string {
-	// Collect label keys and their values
+	// Collect label keys
 	var keys []string
-	var valueLists [][]string
 	for k, vals := range dynamicLabels {
 		if len(vals) > 0 {
 			keys = append(keys, k)
-			valueLists = append(valueLists, vals)
 		}
 	}
 
