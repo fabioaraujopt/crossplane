@@ -609,3 +609,126 @@ func (n *SchemaNavigator) validatePathAgainstSchema(schema *extv1.JSONSchemaProp
 	result.SchemaType = currentSchema.Type
 	return result
 }
+
+// SchemaMismatchField represents a field that exists in source but not in target schema.
+type SchemaMismatchField struct {
+	Path       string // Full path to the field (e.g., "osSku", "nested.field")
+	SourceType string // Type in source schema
+}
+
+// CompareObjectSchemas compares source and target schemas and returns fields that exist
+// in the source but not in the target. This is useful for validating object-to-object patches
+// where the entire object is copied from source to target.
+// The basePath parameter is the path to the object being compared (e.g., "spec.parameters.azure.nodePool").
+func (n *SchemaNavigator) CompareObjectSchemas(sourceGVK, targetGVK schema.GroupVersionKind, basePath string) []SchemaMismatchField {
+	sourceSchema := n.GetSchemaForGVK(sourceGVK)
+	targetSchema := n.GetSchemaForGVK(targetGVK)
+
+	if sourceSchema == nil || targetSchema == nil {
+		return nil
+	}
+
+	// Navigate to the base path in both schemas
+	sourceAtPath := n.getSchemaAtPath(sourceSchema, basePath)
+	targetAtPath := n.getSchemaAtPath(targetSchema, basePath)
+
+	if sourceAtPath == nil || targetAtPath == nil {
+		return nil
+	}
+
+	// Only compare if both are objects
+	if sourceAtPath.Type != "object" || targetAtPath.Type != "object" {
+		return nil
+	}
+
+	// Compare properties recursively
+	var mismatches []SchemaMismatchField
+	n.compareSchemaProperties(sourceAtPath, targetAtPath, "", &mismatches, 10)
+
+	return mismatches
+}
+
+// getSchemaAtPath navigates to the schema at the given path.
+func (n *SchemaNavigator) getSchemaAtPath(schema *extv1.JSONSchemaProps, path string) *extv1.JSONSchemaProps {
+	if schema == nil || path == "" {
+		return schema
+	}
+
+	segments := parseFieldPath(path)
+	current := schema
+
+	for _, seg := range segments {
+		if current == nil {
+			return nil
+		}
+
+		if seg.FieldName != "" {
+			if current.Properties != nil {
+				if prop, ok := current.Properties[seg.FieldName]; ok {
+					current = &prop
+					continue
+				}
+			}
+			// Field not found
+			return nil
+		}
+
+		if seg.IsArrayIndex || seg.IsWildcard {
+			if current.Items != nil && current.Items.Schema != nil {
+				current = current.Items.Schema
+				continue
+			}
+			return nil
+		}
+	}
+
+	return current
+}
+
+// compareSchemaProperties recursively compares properties between source and target schemas.
+func (n *SchemaNavigator) compareSchemaProperties(source, target *extv1.JSONSchemaProps, prefix string, mismatches *[]SchemaMismatchField, maxDepth int) {
+	if source == nil || target == nil || maxDepth <= 0 {
+		return
+	}
+
+	// Check if target has x-kubernetes-preserve-unknown-fields - if so, all fields are allowed
+	if target.XPreserveUnknownFields != nil && *target.XPreserveUnknownFields {
+		return
+	}
+
+	// Compare properties
+	if source.Properties != nil {
+		for name, sourceProp := range source.Properties {
+			fieldPath := name
+			if prefix != "" {
+				fieldPath = prefix + "." + name
+			}
+
+			// Check if target has this property
+			var targetProp *extv1.JSONSchemaProps
+			if target.Properties != nil {
+				if prop, ok := target.Properties[name]; ok {
+					targetProp = &prop
+				}
+			}
+
+			if targetProp == nil {
+				// Check if target allows additional properties
+				if target.AdditionalProperties != nil && target.AdditionalProperties.Allows {
+					continue
+				}
+				// Field exists in source but not in target
+				*mismatches = append(*mismatches, SchemaMismatchField{
+					Path:       fieldPath,
+					SourceType: sourceProp.Type,
+				})
+				continue
+			}
+
+			// If both are objects, recurse
+			if sourceProp.Type == "object" && targetProp.Type == "object" {
+				n.compareSchemaProperties(&sourceProp, targetProp, fieldPath, mismatches, maxDepth-1)
+			}
+		}
+	}
+}

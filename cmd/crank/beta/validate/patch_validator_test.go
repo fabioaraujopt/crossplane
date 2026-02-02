@@ -488,3 +488,252 @@ func TestExtractParameterPaths(t *testing.T) {
 func boolPtr(b bool) *bool {
 	return &b
 }
+
+func TestSchemaNavigator_CompareObjectSchemas(t *testing.T) {
+	// Source CRD (PlatformStampV2) - has osSku field
+	sourceCRD := &extv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: "platformstamps.cloud.example.com"},
+		Spec: extv1.CustomResourceDefinitionSpec{
+			Group: "cloud.example.com",
+			Names: extv1.CustomResourceDefinitionNames{Kind: "PlatformStamp", Plural: "platformstamps"},
+			Versions: []extv1.CustomResourceDefinitionVersion{
+				{
+					Name:   "v1alpha1",
+					Served: true,
+					Schema: &extv1.CustomResourceValidation{
+						OpenAPIV3Schema: &extv1.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]extv1.JSONSchemaProps{
+								"spec": {
+									Type: "object",
+									Properties: map[string]extv1.JSONSchemaProps{
+										"parameters": {
+											Type: "object",
+											Properties: map[string]extv1.JSONSchemaProps{
+												"azure": {
+													Type: "object",
+													Properties: map[string]extv1.JSONSchemaProps{
+														"nodePool": {
+															Type: "object",
+															Properties: map[string]extv1.JSONSchemaProps{
+																"minSize": {Type: "integer"},
+																"maxSize": {Type: "integer"},
+																"osSku":   {Type: "string"}, // This field exists in source
+															},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	// Target CRD (StampCommonV2) - MISSING osSku field
+	targetCRD := &extv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: "stampcommons.cloud.example.com"},
+		Spec: extv1.CustomResourceDefinitionSpec{
+			Group: "cloud.example.com",
+			Names: extv1.CustomResourceDefinitionNames{Kind: "StampCommon", Plural: "stampcommons"},
+			Versions: []extv1.CustomResourceDefinitionVersion{
+				{
+					Name:   "v1alpha1",
+					Served: true,
+					Schema: &extv1.CustomResourceValidation{
+						OpenAPIV3Schema: &extv1.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]extv1.JSONSchemaProps{
+								"spec": {
+									Type: "object",
+									Properties: map[string]extv1.JSONSchemaProps{
+										"parameters": {
+											Type: "object",
+											Properties: map[string]extv1.JSONSchemaProps{
+												"azure": {
+													Type: "object",
+													Properties: map[string]extv1.JSONSchemaProps{
+														"nodePool": {
+															Type: "object",
+															Properties: map[string]extv1.JSONSchemaProps{
+																"minSize": {Type: "integer"},
+																"maxSize": {Type: "integer"},
+																// osSku is MISSING here!
+															},
+														},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	navigator := NewSchemaNavigator([]*extv1.CustomResourceDefinition{sourceCRD, targetCRD})
+
+	sourceGVK := schema.GroupVersionKind{Group: "cloud.example.com", Version: "v1alpha1", Kind: "PlatformStamp"}
+	targetGVK := schema.GroupVersionKind{Group: "cloud.example.com", Version: "v1alpha1", Kind: "StampCommon"}
+
+	// Compare the nodePool objects
+	mismatches := navigator.CompareObjectSchemas(sourceGVK, targetGVK, "spec.parameters.azure.nodePool")
+
+	if len(mismatches) == 0 {
+		t.Fatal("Expected to find mismatches (osSku missing in target), got none")
+	}
+
+	// Check that osSku is in the mismatches
+	foundOsSku := false
+	for _, m := range mismatches {
+		if m.Path == "osSku" {
+			foundOsSku = true
+			if m.SourceType != "string" {
+				t.Errorf("Expected osSku type to be 'string', got '%s'", m.SourceType)
+			}
+		}
+	}
+
+	if !foundOsSku {
+		t.Errorf("Expected to find 'osSku' in mismatches, got: %v", mismatches)
+	}
+}
+
+func TestSchemaNavigator_CompareObjectSchemas_NoMismatch(t *testing.T) {
+	// Both CRDs have the same fields
+	crd := &extv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: "teststamps.cloud.example.com"},
+		Spec: extv1.CustomResourceDefinitionSpec{
+			Group: "cloud.example.com",
+			Names: extv1.CustomResourceDefinitionNames{Kind: "TestStamp", Plural: "teststamps"},
+			Versions: []extv1.CustomResourceDefinitionVersion{
+				{
+					Name:   "v1alpha1",
+					Served: true,
+					Schema: &extv1.CustomResourceValidation{
+						OpenAPIV3Schema: &extv1.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]extv1.JSONSchemaProps{
+								"spec": {
+									Type: "object",
+									Properties: map[string]extv1.JSONSchemaProps{
+										"parameters": {
+											Type: "object",
+											Properties: map[string]extv1.JSONSchemaProps{
+												"nodePool": {
+													Type: "object",
+													Properties: map[string]extv1.JSONSchemaProps{
+														"minSize": {Type: "integer"},
+														"maxSize": {Type: "integer"},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	navigator := NewSchemaNavigator([]*extv1.CustomResourceDefinition{crd})
+
+	gvk := schema.GroupVersionKind{Group: "cloud.example.com", Version: "v1alpha1", Kind: "TestStamp"}
+
+	// Compare same schema - should have no mismatches
+	mismatches := navigator.CompareObjectSchemas(gvk, gvk, "spec.parameters.nodePool")
+
+	if len(mismatches) > 0 {
+		t.Errorf("Expected no mismatches when comparing same schema, got: %v", mismatches)
+	}
+}
+
+func TestSchemaNavigator_CompareObjectSchemas_PreserveUnknownFields(t *testing.T) {
+	// Source has fields, target has x-kubernetes-preserve-unknown-fields
+	sourceCRD := &extv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: "sources.cloud.example.com"},
+		Spec: extv1.CustomResourceDefinitionSpec{
+			Group: "cloud.example.com",
+			Names: extv1.CustomResourceDefinitionNames{Kind: "Source", Plural: "sources"},
+			Versions: []extv1.CustomResourceDefinitionVersion{
+				{
+					Name:   "v1alpha1",
+					Served: true,
+					Schema: &extv1.CustomResourceValidation{
+						OpenAPIV3Schema: &extv1.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]extv1.JSONSchemaProps{
+								"spec": {
+									Type: "object",
+									Properties: map[string]extv1.JSONSchemaProps{
+										"config": {
+											Type: "object",
+											Properties: map[string]extv1.JSONSchemaProps{
+												"field1": {Type: "string"},
+												"field2": {Type: "integer"},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	targetCRD := &extv1.CustomResourceDefinition{
+		ObjectMeta: metav1.ObjectMeta{Name: "targets.cloud.example.com"},
+		Spec: extv1.CustomResourceDefinitionSpec{
+			Group: "cloud.example.com",
+			Names: extv1.CustomResourceDefinitionNames{Kind: "Target", Plural: "targets"},
+			Versions: []extv1.CustomResourceDefinitionVersion{
+				{
+					Name:   "v1alpha1",
+					Served: true,
+					Schema: &extv1.CustomResourceValidation{
+						OpenAPIV3Schema: &extv1.JSONSchemaProps{
+							Type: "object",
+							Properties: map[string]extv1.JSONSchemaProps{
+								"spec": {
+									Type: "object",
+									Properties: map[string]extv1.JSONSchemaProps{
+										"config": {
+											Type:                   "object",
+											XPreserveUnknownFields: boolPtr(true), // Accepts any fields
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	navigator := NewSchemaNavigator([]*extv1.CustomResourceDefinition{sourceCRD, targetCRD})
+
+	sourceGVK := schema.GroupVersionKind{Group: "cloud.example.com", Version: "v1alpha1", Kind: "Source"}
+	targetGVK := schema.GroupVersionKind{Group: "cloud.example.com", Version: "v1alpha1", Kind: "Target"}
+
+	// Compare - should have no mismatches because target accepts unknown fields
+	mismatches := navigator.CompareObjectSchemas(sourceGVK, targetGVK, "spec.config")
+
+	if len(mismatches) > 0 {
+		t.Errorf("Expected no mismatches when target has x-kubernetes-preserve-unknown-fields, got: %v", mismatches)
+	}
+}

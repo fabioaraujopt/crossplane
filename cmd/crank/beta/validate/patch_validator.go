@@ -266,6 +266,59 @@ func (v *PatchValidator) validatePatchPaths(w io.Writer, result *PatchValidation
 				}
 			}
 
+			// Validate object-to-object patches: check that all source fields exist in target
+			// This catches cases where an entire object is patched but the target schema is missing fields
+			if patchInfo.Patch.FromFieldPath != "" && patchInfo.Patch.ToFieldPath != "" {
+				if v.navigator.HasSchema(patchInfo.SourceGVK) && v.navigator.HasSchema(patchInfo.TargetGVK) {
+					// Check source and target schemas at the path
+					sourceValidation := v.navigator.ValidatePath(patchInfo.SourceGVK, patchInfo.Patch.FromFieldPath)
+					targetValidation := v.navigator.ValidatePath(patchInfo.TargetGVK, patchInfo.Patch.ToFieldPath)
+
+					// If both paths are valid and both are objects, compare their schemas
+					if sourceValidation.Valid && targetValidation.Valid &&
+						sourceValidation.SchemaType == "object" && targetValidation.SchemaType == "object" {
+						mismatches := v.navigator.CompareObjectSchemas(
+							patchInfo.SourceGVK,
+							patchInfo.TargetGVK,
+							patchInfo.Patch.FromFieldPath,
+						)
+
+						for _, mismatch := range mismatches {
+							hasError = true
+							fullPath := patchInfo.Patch.ToFieldPath + "." + mismatch.Path
+							invalidPath := InvalidPathInfo{
+								CompositionName: patchInfo.CompositionName,
+								ResourceName:    patchInfo.ResourceName,
+								PatchIndex:      patchInfo.PatchIndex,
+								Path:            fullPath,
+								PathType:        "toFieldPath (object child)",
+								Reason:          fmt.Sprintf("field '%s' exists in source (%s) but not in target schema", mismatch.Path, patchInfo.SourceGVK.Kind),
+								SourceGVK:       patchInfo.SourceGVK,
+								TargetGVK:       patchInfo.TargetGVK,
+								SourceFile:      patchInfo.SourceFile,
+								SourceLine:      patchInfo.SourceLine,
+							}
+							result.InvalidPaths = append(result.InvalidPaths, invalidPath)
+
+							location := formatLocation(patchInfo.SourceFile, patchInfo.SourceLine)
+							if location != "" {
+								if _, err := fmt.Fprintf(w, "[x] %s %s/%s patch[%d]: object patch missing field in target - '%s' exists in %s but not in %s\n",
+									location, patchInfo.CompositionName, patchInfo.ResourceName, patchInfo.PatchIndex,
+									mismatch.Path, patchInfo.SourceGVK.Kind, patchInfo.TargetGVK.Kind); err != nil {
+									return errors.Wrap(err, "cannot write output")
+								}
+							} else {
+								if _, err := fmt.Fprintf(w, "[x] %s/%s patch[%d]: object patch missing field in target - '%s' exists in %s but not in %s\n",
+									patchInfo.CompositionName, patchInfo.ResourceName, patchInfo.PatchIndex,
+									mismatch.Path, patchInfo.SourceGVK.Kind, patchInfo.TargetGVK.Kind); err != nil {
+									return errors.Wrap(err, "cannot write output")
+								}
+							}
+						}
+					}
+				}
+			}
+
 			// Validate combine variables
 			if patchInfo.Patch.Combine != nil {
 				for i, variable := range patchInfo.Patch.Combine.Variables {
