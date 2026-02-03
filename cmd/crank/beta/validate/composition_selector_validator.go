@@ -315,15 +315,34 @@ func (v *CompositionSelectorValidator) getDynamicSelectorLabels(compName, resNam
 // Examples:
 //   - "spec.compositionSelector.matchLabels.provider" -> "provider"
 //   - "spec.crossplane.compositionSelector.matchLabels.provider" -> "provider"
+//   - "spec.crossplane.compositionSelector.matchLabels["azure-logging-enabled"]" -> "azure-logging-enabled"
 func (v *CompositionSelectorValidator) extractSelectorLabelKey(toFieldPath string) string {
-	patterns := []string{
+	// Patterns for dot notation
+	dotPatterns := []string{
 		"spec.compositionSelector.matchLabels.",
 		"spec.crossplane.compositionSelector.matchLabels.",
 	}
 
-	for _, pattern := range patterns {
+	for _, pattern := range dotPatterns {
 		if strings.HasPrefix(toFieldPath, pattern) {
 			return strings.TrimPrefix(toFieldPath, pattern)
+		}
+	}
+
+	// Patterns for bracket notation: matchLabels["key"] or matchLabels[key]
+	bracketPatterns := []string{
+		"spec.compositionSelector.matchLabels[",
+		"spec.crossplane.compositionSelector.matchLabels[",
+	}
+
+	for _, pattern := range bracketPatterns {
+		if strings.HasPrefix(toFieldPath, pattern) {
+			// Extract the key from brackets, e.g., ["azure-logging-enabled"] or [key]
+			remainder := strings.TrimPrefix(toFieldPath, pattern)
+			// Remove trailing ] and any quotes
+			key := strings.TrimSuffix(remainder, "]")
+			key = strings.Trim(key, "\"'")
+			return key
 		}
 	}
 
@@ -349,8 +368,17 @@ func (v *CompositionSelectorValidator) getPossibleValuesFromPatch(comp *ParsedCo
 	return nil
 }
 
-// getEnumValuesFromFieldPath looks up the enum values for a field path in the XRD schema.
+// getEnumValuesFromFieldPath looks up the enum values for a field path in the XRD schema,
+// or extracts possible values from map transforms.
 func (v *CompositionSelectorValidator) getEnumValuesFromFieldPath(kind, fieldPath string, transforms []Transform) []string {
+	// First, check if any transform has a map - if so, return all map OUTPUT values
+	// This handles cases where the source field doesn't have enum but the map defines all possible outputs
+	mapOutputValues := v.extractMapOutputValues(transforms)
+	if len(mapOutputValues) > 0 {
+		return mapOutputValues
+	}
+
+	// Fall back to enum-based extraction
 	schema := v.xrdSchemas[kind]
 	if schema == nil {
 		return nil
@@ -374,6 +402,29 @@ func (v *CompositionSelectorValidator) getEnumValuesFromFieldPath(kind, fieldPat
 	}
 
 	return values
+}
+
+// extractMapOutputValues extracts all possible output values from map transforms.
+// For example, a map transform like {"dev": "false", "prod": "true"} returns ["false", "true"].
+func (v *CompositionSelectorValidator) extractMapOutputValues(transforms []Transform) []string {
+	var allValues []string
+	seen := make(map[string]bool)
+
+	for _, transform := range transforms {
+		if transform.Type == "map" && transform.Map != nil {
+			// Extract all OUTPUT values from the map
+			for _, outputValue := range transform.Map {
+				if !seen[outputValue] {
+					seen[outputValue] = true
+					allValues = append(allValues, outputValue)
+				}
+			}
+		}
+	}
+
+	// Sort for deterministic results
+	sort.Strings(allValues)
+	return allValues
 }
 
 // navigateToField navigates through the schema to find a field.

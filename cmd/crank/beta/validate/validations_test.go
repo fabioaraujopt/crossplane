@@ -4771,6 +4771,19 @@ func TestCompositionSelectorValidator_ExtractSelectorLabelKey(t *testing.T) {
 			toFieldPath: "spec.parameters.cloud", // Not a selector
 			wantKey:     "",
 		},
+		// Bracket notation tests
+		{
+			toFieldPath: `spec.crossplane.compositionSelector.matchLabels["azure-logging-enabled"]`,
+			wantKey:     "azure-logging-enabled",
+		},
+		{
+			toFieldPath: `spec.compositionSelector.matchLabels["flow-logs-enabled"]`,
+			wantKey:     "flow-logs-enabled",
+		},
+		{
+			toFieldPath: `spec.crossplane.compositionSelector.matchLabels[provider]`,
+			wantKey:     "provider",
+		},
 	}
 
 	for _, tc := range tests {
