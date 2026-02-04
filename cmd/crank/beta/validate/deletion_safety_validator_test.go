@@ -26,6 +26,173 @@ import (
 	"k8s.io/apimachinery/pkg/runtime/schema"
 )
 
+func TestValidateHelmWait(t *testing.T) {
+	tests := []struct {
+		name           string
+		compositions   []*ParsedComposition
+		wantWarnings   int
+		wantCategories []string
+	}{
+		{
+			name: "Helm release without wait",
+			compositions: []*ParsedComposition{
+				{
+					Name:       "test-composition",
+					SourceFile: "test.yaml",
+					Resources: []ComposedResource{
+						{
+							Name: "my-helm-release",
+							Base: &unstructured.Unstructured{
+								Object: map[string]interface{}{
+									"apiVersion": "helm.crossplane.io/v1beta1",
+									"kind":       "Release",
+									"spec": map[string]interface{}{
+										"rollbackLimit": int64(100),
+										"forProvider": map[string]interface{}{
+											"chart": map[string]interface{}{
+												"name": "my-chart",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantWarnings:   1,
+			wantCategories: []string{"helmWait"},
+		},
+		{
+			name: "Helm release with wait but no timeout",
+			compositions: []*ParsedComposition{
+				{
+					Name:       "test-composition",
+					SourceFile: "test.yaml",
+					Resources: []ComposedResource{
+						{
+							Name: "my-helm-release",
+							Base: &unstructured.Unstructured{
+								Object: map[string]interface{}{
+									"apiVersion": "helm.crossplane.io/v1beta1",
+									"kind":       "Release",
+									"spec": map[string]interface{}{
+										"rollbackLimit": int64(100),
+										"forProvider": map[string]interface{}{
+											"wait": true,
+											"chart": map[string]interface{}{
+												"name": "my-chart",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantWarnings:   1,
+			wantCategories: []string{"helmWait"},
+		},
+		{
+			name: "Helm release with wait and timeout - no warnings",
+			compositions: []*ParsedComposition{
+				{
+					Name:       "test-composition",
+					SourceFile: "test.yaml",
+					Resources: []ComposedResource{
+						{
+							Name: "my-helm-release",
+							Base: &unstructured.Unstructured{
+								Object: map[string]interface{}{
+									"apiVersion": "helm.crossplane.io/v1beta1",
+									"kind":       "Release",
+									"spec": map[string]interface{}{
+										"rollbackLimit": int64(100),
+										"forProvider": map[string]interface{}{
+											"wait":        true,
+											"waitTimeout": "5m",
+											"chart": map[string]interface{}{
+												"name": "my-chart",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantWarnings: 0,
+		},
+		{
+			name: "Multiple Helm releases - one missing wait",
+			compositions: []*ParsedComposition{
+				{
+					Name:       "test-composition",
+					SourceFile: "test.yaml",
+					Resources: []ComposedResource{
+						{
+							Name: "helm-with-wait",
+							Base: &unstructured.Unstructured{
+								Object: map[string]interface{}{
+									"apiVersion": "helm.crossplane.io/v1beta1",
+									"kind":       "Release",
+									"spec": map[string]interface{}{
+										"rollbackLimit": int64(100),
+										"forProvider": map[string]interface{}{
+											"wait":        true,
+											"waitTimeout": "5m",
+											"chart": map[string]interface{}{
+												"name": "chart-a",
+											},
+										},
+									},
+								},
+							},
+						},
+						{
+							Name: "helm-without-wait",
+							Base: &unstructured.Unstructured{
+								Object: map[string]interface{}{
+									"apiVersion": "helm.crossplane.io/v1beta1",
+									"kind":       "Release",
+									"spec": map[string]interface{}{
+										"rollbackLimit": int64(100),
+										"forProvider": map[string]interface{}{
+											"chart": map[string]interface{}{
+												"name": "chart-b",
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			wantWarnings:   1,
+			wantCategories: []string{"helmWait"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issues := DetectMissingHelmWait(tt.compositions)
+
+			assert.Equal(t, tt.wantWarnings, len(issues), "unexpected number of warnings")
+
+			if len(tt.wantCategories) > 0 {
+				for i, issue := range issues {
+					if i < len(tt.wantCategories) {
+						assert.Equal(t, tt.wantCategories[i], issue.Category)
+					}
+				}
+			}
+		})
+	}
+}
+
 func TestValidateRollbackLimits(t *testing.T) {
 	tests := []struct {
 		name           string

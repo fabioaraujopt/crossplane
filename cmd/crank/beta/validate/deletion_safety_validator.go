@@ -359,6 +359,16 @@ func (v *DeletionSafetyValidator) Validate() *DeletionSafetyResult {
 		}
 	}
 
+	// 1b. Check wait: true and waitTimeout on Helm releases
+	waitIssues := v.validateHelmWait()
+	for _, issue := range waitIssues {
+		if issue.Severity == "error" {
+			result.Errors = append(result.Errors, issue)
+		} else {
+			result.Warnings = append(result.Warnings, issue)
+		}
+	}
+
 	// 2. Check IAM → Helm Usage protection (IRSA)
 	iamIssues := v.validateIAMUsageProtection()
 	for _, issue := range iamIssues {
@@ -421,6 +431,43 @@ func (v *DeletionSafetyValidator) validateRollbackLimits() []DeletionSafetyIssue
 				Severity:    "warning",
 				Category:    "rollbackLimit",
 				Suggestion:  "Increase 'spec.rollbackLimit' to at least 100 for stability",
+			})
+		}
+	}
+
+	return issues
+}
+
+// validateHelmWait checks that all Helm releases have wait: true and waitTimeout set.
+// Without wait: true, Helm marks releases as "ready" immediately after applying manifests,
+// even if pods are crashing (e.g., ImagePullBackOff, CrashLoopBackOff).
+// This causes compositions to show Ready: True while workloads are actually unhealthy.
+func (v *DeletionSafetyValidator) validateHelmWait() []DeletionSafetyIssue {
+	var issues []DeletionSafetyIssue
+
+	for _, helm := range v.helmReleases {
+		if !helm.Wait {
+			issues = append(issues, DeletionSafetyIssue{
+				Composition: helm.Composition,
+				Resource:    helm.Name,
+				SourceFile:  helm.SourceFile,
+				SourceLine:  helm.SourceLine,
+				Message:     fmt.Sprintf("Helm release '%s' missing 'wait: true' - composition may show Ready while pods are failing", helm.Name),
+				Severity:    "warning",
+				Category:    "helmWait",
+				Suggestion:  "Add 'spec.forProvider.wait: true' and 'spec.forProvider.waitTimeout: 5m' to ensure accurate health reporting",
+			})
+		} else if helm.WaitTimeout == "" {
+			// Has wait: true but no timeout - could hang indefinitely
+			issues = append(issues, DeletionSafetyIssue{
+				Composition: helm.Composition,
+				Resource:    helm.Name,
+				SourceFile:  helm.SourceFile,
+				SourceLine:  helm.SourceLine,
+				Message:     fmt.Sprintf("Helm release '%s' has 'wait: true' but missing 'waitTimeout' - may hang indefinitely", helm.Name),
+				Severity:    "warning",
+				Category:    "helmWait",
+				Suggestion:  "Add 'spec.forProvider.waitTimeout: 5m' (or appropriate timeout for slow-starting services)",
 			})
 		}
 	}
@@ -1207,6 +1254,33 @@ func DetectMissingRollbackLimit(compositions []*ParsedComposition) []DeletionSaf
 	}
 
 	return validator.validateRollbackLimits()
+}
+
+// DetectMissingHelmWait is a convenience function to check only wait: true and waitTimeout.
+func DetectMissingHelmWait(compositions []*ParsedComposition) []DeletionSafetyIssue {
+	validator := &DeletionSafetyValidator{
+		compositions: compositions,
+		helmReleases: make([]HelmReleaseInfo, 0),
+	}
+
+	// Extract only Helm releases
+	for _, comp := range compositions {
+		sourceFile := comp.SourceFile
+		sourceLine := comp.SourceLine
+
+		for _, res := range comp.Resources {
+			if res.Base == nil {
+				continue
+			}
+			gvk := res.Base.GroupVersionKind()
+			if gvk.Group == "helm.crossplane.io" && gvk.Kind == "Release" {
+				helmInfo := validator.extractHelmRelease(res, comp.Name, sourceFile, sourceLine)
+				validator.helmReleases = append(validator.helmReleases, helmInfo)
+			}
+		}
+	}
+
+	return validator.validateHelmWait()
 }
 
 // GetSourceFileFromObject extracts source file annotation from an unstructured object.
